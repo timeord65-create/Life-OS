@@ -2,8 +2,6 @@ import streamlit as st
 import sqlite3
 import json
 import os
-import re
-import pandas as pd
 from datetime import datetime
 import yt_dlp
 from google import genai
@@ -11,6 +9,52 @@ from google import genai
 st.set_page_config(page_title="Recettes & Planning Alimentation", page_icon="🍳", layout="wide")
 
 DB_FILE = "life_os.db"
+
+# --- INITIALISATION AUTOMATIQUE DES TABLES ---
+def init_food_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS recipes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT,
+            portions INTEGER,
+            prep_time TEXT,
+            calories TEXT,
+            ingredients TEXT,
+            instructions TEXT,
+            source_url TEXT,
+            date_added TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS placard (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nom TEXT UNIQUE,
+            en_stock INTEGER DEFAULT 1
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS meal_plan (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            day_of_week TEXT,
+            meal_time TEXT,
+            recipe_title TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            type TEXT,
+            category TEXT,
+            amount REAL,
+            date TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_food_db()
 
 # Récupération clé API Gemini
 gemini_key = os.getenv("GEMINI_API_KEY")
@@ -214,7 +258,7 @@ with tab_plan:
                     st.rerun()
 
 # ==========================================
-# TAB 4 : LISTE DE COURSES INTELIGENCE
+# TAB 4 : LISTE DE COURSES INTELLIGENTE
 # ==========================================
 with tab_courses:
     st.subheader("🛒 Liste de courses déduite du planning & du placard")

@@ -104,7 +104,7 @@ def parse_recipe_with_gemini(raw_text: str, api_key: str):
     Si une information manque, estime-la de façon réaliste.
     """
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.6-flash",
         contents=prompt,
         config={"response_mime_type": "application/json"}
     )

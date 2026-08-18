@@ -1,93 +1,53 @@
 import streamlit as st
-import sqlite3
 import json
 import os
+import re
 from datetime import datetime
 import yt_dlp
 from google import genai
+from supabase import create_client, Client
 
 st.set_page_config(page_title="Recettes & Planning Alimentation", page_icon="🍳", layout="wide")
 
-DB_FILE = "life_os.db"
-
-# --- INITIALISATION AUTOMATIQUE DES TABLES ---
-def init_food_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS recipes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT,
-            portions INTEGER,
-            prep_time TEXT,
-            calories TEXT,
-            ingredients TEXT,
-            instructions TEXT,
-            source_url TEXT,
-            date_added TEXT
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS placard (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nom TEXT UNIQUE,
-            en_stock INTEGER DEFAULT 1
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS meal_plan (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            day_of_week TEXT,
-            meal_time TEXT,
-            recipe_title TEXT
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            type TEXT,
-            category TEXT,
-            amount REAL,
-            date TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-init_food_db()
-
-# Récupération clé API Gemini
+# --- CONNEXION SUPABASE ---
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_KEY")
 gemini_key = os.getenv("GEMINI_API_KEY")
 
+@st.cache_resource
+def get_supabase() -> Client:
+    if supabase_url and supabase_key:
+        return create_client(supabase_url, supabase_key)
+    return None
+
+supabase = get_supabase()
+
 st.title("🍳 Hub Alimentation : Recettes, Planning & Courses")
+
+if not supabase:
+    st.warning("⚠️ Supabase n'est pas encore configuré dans les Secrets. Les données ne seront pas sauvegardées en ligne.")
 
 tab_import, tab_recettes, tab_plan, tab_courses, tab_placard = st.tabs([
     "📥 Importer (Reel / Vidéo)",
     "📖 Mes Recettes",
-    "📅 Planning Semaine",
+    "📅 Planning & Portions",
     "🛒 Courses Intelligentes",
     "🥫 Fond de Placard"
 ])
 
 # --- FONCTIONS YT-DLP & GEMINI ---
 def extract_video_info(url: str):
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'extract_flat': False,
-        'skip_download': True
-    }
+    ydl_opts = {'quiet': True, 'no_warnings': True, 'skip_download': True}
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
-        title = info.get('title', '')
-        description = info.get('description', '')
-        return f"Titre: {title}\nDescription:\n{description}"
+        return f"Titre: {info.get('title', '')}\nDescription:\n{info.get('description', '')}"
 
 def parse_recipe_with_gemini(raw_text: str, api_key: str):
     client = genai.Client(api_key=api_key)
     prompt = f"""
-    Tu es un assistant culinaire expert. Analyse le texte suivant extrait d'un Reel / Short / Vidéo de cuisine.
-    Extrais les informations de la recette sous format JSON strict.
+    Tu es un assistant culinaire expert. Analyse le texte suivant extrait d'une vidéo/Reel de cuisine.
+    1. Extrais les détails de la recette.
+    2. Détecte et isole STRICTEMENT les ingrédients de type 'Fond de placard / Longue conservation' (huiles, vinaigres, épices, herbes sèches, sel, poivre, moutarde, sauces asiatiques, conserves, farines, sucre, miel, cubes bouillon, etc.).
 
     Texte source :
     \"\"\"{raw_text}\"\"\"
@@ -98,10 +58,10 @@ def parse_recipe_with_gemini(raw_text: str, api_key: str):
         "portions": 2,
         "prep_time": "15 min",
         "calories": "450 kcal",
-        "ingredients": ["100g de pâtes", "2 œufs", "50g de parmesan", "Poivre noir"],
-        "instructions": "1. Cuire les pâtes. 2. Mélanger les œufs et le fromage. 3. Assembler."
+        "ingredients": ["200g de poulet", "100g de riz basmati", "1 c.à.s d'huile d'olive", "1 c.à.c de paprika", "Sel", "Poivre"],
+        "placard_detected": ["Huile d'olive", "Paprika", "Sel", "Poivre"],
+        "instructions": "1. Couper le poulet. 2. Cuire avec les épices. 3. Servir avec le riz."
     }}
-    Si une information manque, estime-la de façon réaliste.
     """
     response = client.models.generate_content(
         model="gemini-3.6-flash",
@@ -114,190 +74,185 @@ def parse_recipe_with_gemini(raw_text: str, api_key: str):
 # TAB 1 : IMPORTER UNE RECETTE
 # ==========================================
 with tab_import:
-    st.subheader("📥 Importer depuis Instagram Reel, TikTok ou YouTube Shorts")
-    video_url = st.text_input("Lien de la vidéo (Reel, Shorts, TikTok)", placeholder="https://www.instagram.com/reel/...")
+    st.subheader("📥 Importer depuis Instagram Reel, TikTok ou Shorts")
+    video_url = st.text_input("Lien de la vidéo", placeholder="https://www.instagram.com/reel/...")
 
-    if st.button("🪄 Extraire la recette avec l'IA", type="primary"):
+    if st.button("🪄 Extraire et sauvegarder (Recette + Placard auto)", type="primary"):
         if not video_url:
-            st.warning("Veuillez coller un lien de vidéo.")
+            st.warning("Colle d'abord un lien vidéo valide.")
         elif not gemini_key:
-            st.error("Clé API Gemini non configurée dans les Secrets Streamlit.")
+            st.error("Clé API Gemini introuvable dans les Secrets.")
         else:
-            with st.spinner("Analyse de la vidéo et extraction par Gemini..."):
+            with st.spinner("Analyse par l'IA et détection automatique des ingrédients de placard..."):
                 try:
                     raw_info = extract_video_info(video_url)
-                    recipe_data = parse_recipe_with_gemini(raw_info, gemini_key)
+                    rec = parse_recipe_with_gemini(raw_info, gemini_key)
+                    
+                    if supabase:
+                        # 1. Enregistrement de la recette
+                        supabase.table("recipes").insert({
+                            "title": rec.get("title", "Sans titre"),
+                            "portions": rec.get("portions", 2),
+                            "prep_time": rec.get("prep_time", "20 min"),
+                            "calories": rec.get("calories", "500 kcal"),
+                            "ingredients": rec.get("ingredients", []),
+                            "instructions": rec.get("instructions", ""),
+                            "source_url": video_url,
+                            "date_added": datetime.now().strftime("%Y-%m-%d")
+                        }).execute()
 
-                    conn = sqlite3.connect(DB_FILE)
-                    c = conn.cursor()
-                    c.execute("""
-                        INSERT INTO recipes (title, portions, prep_time, calories, ingredients, instructions, source_url, date_added)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        recipe_data.get("title", "Recette sans titre"),
-                        recipe_data.get("portions", 2),
-                        recipe_data.get("prep_time", "20 min"),
-                        recipe_data.get("calories", "500 kcal"),
-                        json.dumps(recipe_data.get("ingredients", []), ensure_ascii=False),
-                        recipe_data.get("instructions", ""),
-                        video_url,
-                        datetime.now().strftime("%Y-%m-%d")
-                    ))
-                    conn.commit()
-                    conn.close()
+                        # 2. Ajout automatique des éléments de placard détectés
+                        detected_placard = rec.get("placard_detected", [])
+                        if detected_placard:
+                            # Récupérer les items existants pour éviter les doublons
+                            res_ex = supabase.table("placard").select("nom").execute()
+                            existing_names = [x["nom"].lower() for x in (res_ex.data or [])]
 
-                    st.success(f"🎉 Recette « {recipe_data.get('title')} » enregistrée avec succès !")
+                            for item in detected_placard:
+                                item_clean = item.strip().capitalize()
+                                if item_clean.lower() not in existing_names:
+                                    supabase.table("placard").insert({
+                                        "nom": item_clean,
+                                        "en_stock": True
+                                    }).execute()
+
+                    st.success(f"🎉 Recette « {rec.get('title')} » enregistrée !")
+                    if rec.get("placard_detected"):
+                        st.info(f"🥫 Éléments ajoutés au fond de placard : {', '.join(rec.get('placard_detected'))}")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Erreur lors de l'extraction : {e}")
-
-    st.divider()
-    st.subheader("✍️ Ou ajouter une recette manuellement")
-    with st.expander("Ajouter manuellement"):
-        with st.form("manual_recipe_form"):
-            m_title = st.text_input("Nom de la recette")
-            c1, c2, c3 = st.columns(3)
-            m_portions = c1.number_input("Portions", min_value=1, value=2)
-            m_time = c2.text_input("Temps de prépa", value="20 min")
-            m_cal = c3.text_input("Calories", value="450 kcal")
-            m_ing = st.text_area("Ingrédients (1 par ligne)", placeholder="100g de riz\n2 steaks\n1 filet d'huile d'olive")
-            m_inst = st.text_area("Instructions de préparation")
-
-            if st.form_submit_button("Enregistrer la recette"):
-                if m_title:
-                    ing_list = [i.strip() for i in m_ing.split("\n") if i.strip()]
-                    conn = sqlite3.connect(DB_FILE)
-                    c = conn.cursor()
-                    c.execute("""
-                        INSERT INTO recipes (title, portions, prep_time, calories, ingredients, instructions, source_url, date_added)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (m_title, m_portions, m_time, m_cal, json.dumps(ing_list, ensure_ascii=False), m_inst, "", datetime.now().strftime("%Y-%m-%d")))
-                    conn.commit()
-                    conn.close()
-                    st.success("Recette ajoutée !")
-                    st.rerun()
+                    st.error(f"Erreur : {e}")
 
 # ==========================================
-# TAB 2 : MES RECETTES ENREGISTRÉES
+# TAB 2 : MES RECETTES
 # ==========================================
+recipes_list = []
+if supabase:
+    res = supabase.table("recipes").select("*").order("id", desc=True).execute()
+    recipes_list = res.data or []
+
 with tab_recettes:
-    st.subheader("📖 Bibliothèque de recettes")
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT id, title, portions, prep_time, calories, ingredients, instructions, source_url FROM recipes ORDER BY id DESC")
-    all_recs = c.fetchall()
-    conn.close()
-
-    if not all_recs:
-        st.info("Aucune recette enregistrée pour le moment. Importe ton premier Reel !")
+    st.subheader("📖 Mes recettes sauvegardées")
+    if not recipes_list:
+        st.info("Aucune recette enregistrée.")
     else:
-        for r_id, r_title, r_portions, r_time, r_cal, r_ing, r_inst, r_url in all_recs:
-            with st.expander(f"🍽️ **{r_title}** ({r_time} • {r_cal} • {r_portions} pers.)"):
-                col_left, col_right = st.columns([1, 1])
-                with col_left:
-                    st.markdown("**🛒 Ingrédients :**")
-                    try:
-                        ings = json.loads(r_ing)
-                        for ing in ings:
-                            st.write(f"- {ing}")
-                    except:
-                        st.write(r_ing)
-
-                with col_right:
+        for r in recipes_list:
+            with st.expander(f"🍽️ **{r['title']}** ({r['prep_time']} • {r['calories']} • Base: {r['portions']} pers.)"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown("**🛒 Ingrédients d'origine :**")
+                    for ing in r.get("ingredients", []):
+                        st.write(f"- {ing}")
+                with c2:
                     st.markdown("**👨‍🍳 Instructions :**")
-                    st.write(r_inst)
-                    if r_url:
-                        st.link_button("🔗 Voir la vidéo originale", r_url)
-
-                if st.button("🗑️ Supprimer cette recette", key=f"del_rec_{r_id}"):
-                    conn = sqlite3.connect(DB_FILE)
-                    c = conn.cursor()
-                    c.execute("DELETE FROM recipes WHERE id = ?", (r_id,))
-                    conn.commit()
-                    conn.close()
+                    st.write(r.get("instructions", ""))
+                    if r.get("source_url"):
+                        st.link_button("🔗 Voir la vidéo", r["source_url"])
+                
+                if st.button("🗑️ Supprimer", key=f"del_rec_{r['id']}"):
+                    supabase.table("recipes").delete().eq("id", r["id"]).execute()
                     st.rerun()
 
 # ==========================================
-# TAB 3 : PLANNING SEMAINE
+# TAB 3 : PLANNING SEMAINE & NB DE PERSONNES
 # ==========================================
 with tab_plan:
-    st.subheader("📅 Organiser les repas de la semaine")
+    st.subheader("📅 Planning des repas & Nombre de personnes")
     days = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
-
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT title FROM recipes")
-    recipe_options = [r[0] for r in c.fetchall()]
-
-    c.execute("SELECT day_of_week, meal_time, recipe_title FROM meal_plan")
-    current_plan = {(r[0], r[1]): r[2] for r in c.fetchall()}
-    conn.close()
-
-    col_j1, col_j2 = st.columns(2)
+    all_titles = [r["title"] for r in recipes_list]
+    
+    plan_data = {}
+    if supabase:
+        res_p = supabase.table("meal_plan").select("*").execute()
+        for p in (res_p.data or []):
+            plan_data[(p["day_of_week"], p["meal_time"])] = {
+                "recipe": p["recipe_title"],
+                "portions": p.get("portions", 2) or 2
+            }
+            
+    c_a, c_b = st.columns(2)
     for idx, day in enumerate(days):
-        col = col_j1 if idx < 4 else col_j2
+        col = c_a if idx < 4 else c_b
         with col:
             with st.expander(f"📍 {day}", expanded=True):
-                midi_val = current_plan.get((day, "Midi"), "—")
-                soir_val = current_plan.get((day, "Soir"), "—")
-
-                opts = ["—"] + recipe_options
-                new_midi = st.selectbox(f"{day} - Midi", opts, index=opts.index(midi_val) if midi_val in opts else 0, key=f"plan_{day}_midi")
-                new_soir = st.selectbox(f"{day} - Soir", opts, index=opts.index(soir_val) if soir_val in opts else 0, key=f"plan_{day}_soir")
-
-                if new_midi != midi_val or new_soir != soir_val:
-                    conn = sqlite3.connect(DB_FILE)
-                    c = conn.cursor()
-                    c.execute("DELETE FROM meal_plan WHERE day_of_week = ?", (day,))
-                    if new_midi != "—":
-                        c.execute("INSERT INTO meal_plan (day_of_week, meal_time, recipe_title) VALUES (?, 'Midi', ?)", (day, new_midi))
-                    if new_soir != "—":
-                        c.execute("INSERT INTO meal_plan (day_of_week, meal_time, recipe_title) VALUES (?, 'Soir', ?)", (day, new_soir))
-                    conn.commit()
-                    conn.close()
-                    st.rerun()
+                # Midi
+                m_info = plan_data.get((day, "Midi"), {"recipe": "—", "portions": 2})
+                col_m1, col_m2 = st.columns([3, 1])
+                opts = ["—"] + all_titles
+                new_m_rec = col_m1.selectbox(f"{day} - Midi", opts, index=opts.index(m_info["recipe"]) if m_info["recipe"] in opts else 0, key=f"p_{day}_m_rec")
+                new_m_port = col_m2.number_input("Pers.", min_value=1, max_value=12, value=int(m_info["portions"]), key=f"p_{day}_m_port")
+                
+                # Soir
+                s_info = plan_data.get((day, "Soir"), {"recipe": "—", "portions": 2})
+                col_s1, col_s2 = st.columns([3, 1])
+                new_s_rec = col_s1.selectbox(f"{day} - Soir", opts, index=opts.index(s_info["recipe"]) if s_info["recipe"] in opts else 0, key=f"p_{day}_s_rec")
+                new_s_port = col_s2.number_input("Pers.", min_value=1, max_value=12, value=int(s_info["portions"]), key=f"p_{day}_s_port")
+                
+                # Sauvegarde si changement
+                if (new_m_rec != m_info["recipe"] or new_m_port != m_info["portions"] or 
+                    new_s_rec != s_info["recipe"] or new_s_port != s_info["portions"]):
+                    if supabase:
+                        supabase.table("meal_plan").delete().eq("day_of_week", day).execute()
+                        if new_m_rec != "—":
+                            supabase.table("meal_plan").insert({"day_of_week": day, "meal_time": "Midi", "recipe_title": new_m_rec, "portions": new_m_port}).execute()
+                        if new_s_rec != "—":
+                            supabase.table("meal_plan").insert({"day_of_week": day, "meal_time": "Soir", "recipe_title": new_s_rec, "portions": new_s_port}).execute()
+                        st.rerun()
 
 # ==========================================
-# TAB 4 : LISTE DE COURSES INTELLIGENTE
+# TAB 4 : LISTE DE COURSES AJUSTÉE
 # ==========================================
 with tab_courses:
-    st.subheader("🛒 Liste de courses déduite du planning & du placard")
+    st.subheader("🛒 Liste de courses avec portions adaptées")
+    
+    placard_items = []
+    if supabase:
+        res_pl = supabase.table("placard").select("nom").eq("en_stock", True).execute()
+        placard_items = [row["nom"].lower() for row in (res_pl.data or [])]
 
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT DISTINCT recipe_title FROM meal_plan WHERE recipe_title != '—'")
-    planned = [r[0] for r in c.fetchall()]
+    # Dictionnaire des recettes par titre
+    rec_by_title = {r["title"]: r for r in recipes_list}
 
-    c.execute("SELECT LOWER(nom) FROM placard WHERE en_stock = 1")
-    placard_items = [r[0] for r in c.fetchall()]
+    # Liste des ingrédients ajustés
+    to_buy = []
+    
+    for (day, meal_time), meal_val in plan_data.items():
+        rec_name = meal_val["recipe"]
+        planned_portions = meal_val["portions"]
+        
+        if rec_name in rec_by_title:
+            r = rec_by_title[rec_name]
+            base_portions = r.get("portions", 2) or 2
+            ratio = planned_portions / base_portions
+            
+            for raw_ing in r.get("ingredients", []):
+                # Vérification si en stock dans le fond de placard
+                is_in_placard = any(p in raw_ing.lower() for p in placard_items)
+                if not is_in_placard:
+                    # Ajustement mathématique des quantités numériques trouvées dans le texte
+                    def scale_match(match):
+                        val = float(match.group(0).replace(',', '.'))
+                        scaled = val * ratio
+                        # Formatage propre (entier si pas de virgule)
+                        return str(int(scaled)) if scaled.is_integer() else f"{scaled:.1f}"
+                    
+                    adjusted_ing = re.sub(r'^\d+(\.\d+)?|\b\d+(\.\d+)?(?=\s*(g|kg|ml|cl|l|c\.à\.s|c\.à\.c|tranches?|oeufs?|œufs?|gousses?|pincées?))', scale_match, raw_ing, flags=re.IGNORECASE)
+                    
+                    # Indication du repas concerné
+                    to_buy.append(f"{adjusted_ing} *(pour {rec_name} - {day} {meal_time}, {planned_portions} pers.)*")
 
-    ingredients_to_buy = []
-    for rec_name in planned:
-        c.execute("SELECT ingredients FROM recipes WHERE title = ?", (rec_name,))
-        row = c.fetchone()
-        if row and row[0]:
-            try:
-                ings = json.loads(row[0])
-                for ing in ings:
-                    already_have = any(p in ing.lower() for p in placard_items)
-                    if not already_have:
-                        ingredients_to_buy.append(ing)
-            except:
-                pass
-    conn.close()
-
-    if not ingredients_to_buy:
-        st.info("Aucun ingrédient nécessaire pour le moment (ajoute des repas dans le planning).")
+    if not to_buy:
+        st.info("Aucun ingrédient nécessaire ou tous les ingrédients sont déjà dans ton Fond de Placard.")
     else:
-        st.write(f"🛒 **{len(ingredients_to_buy)} ingrédients à acheter :**")
-        for i, ing in enumerate(ingredients_to_buy):
-            st.checkbox(ing, key=f"buy_{i}")
-
+        st.write(f"🛒 **{len(to_buy)} ingrédients à prévoir cette semaine :**")
+        for i, item in enumerate(to_buy):
+            st.checkbox(item, key=f"buy_cloud_{i}")
+            
         st.divider()
         st.markdown("### 💳 Valider mes courses")
         montant_ticket = st.number_input("Montant total du ticket de caisse (€)", min_value=0.0, step=5.0, value=45.0)
         if st.button("Valider et ajouter aux dépenses du mois", type="primary"):
-            conn = sqlite3.connect(DB_FILE)
+            conn = sqlite3.connect("life_os.db")
             c = conn.cursor()
             c.execute("INSERT INTO transactions (type, category, amount, date) VALUES ('Dépense', 'Alimentation', ?, date('now'))", (montant_ticket,))
             conn.commit()
@@ -308,24 +263,22 @@ with tab_courses:
 # TAB 5 : FOND DE PLACARD
 # ==========================================
 with tab_placard:
-    st.subheader("🥫 Essentiels longue conservation (Placard & Épices)")
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT id, nom, en_stock FROM placard ORDER BY nom ASC")
-    items = c.fetchall()
-
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        for i_id, nom, stock in items:
-            check = st.checkbox(nom, value=bool(stock), key=f"pl_{i_id}")
-            if check != bool(stock):
-                c.execute("UPDATE placard SET en_stock = ? WHERE id = ?", (1 if check else 0, i_id))
-                conn.commit()
+    st.subheader("🥫 Fond de Placard (Ingrédients permanents & Épices)")
+    st.caption("Ces ingrédients sont exclus automatiquement de ta liste de courses tant qu'ils sont cochés 'En stock'.")
+    
+    if supabase:
+        res_all_pl = supabase.table("placard").select("*").order("nom").execute()
+        items = res_all_pl.data or []
+        
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            for it in items:
+                checked = st.checkbox(f"**{it['nom']}**", value=it["en_stock"], key=f"pl_it_{it['id']}")
+                if checked != it["en_stock"]:
+                    supabase.table("placard").update({"en_stock": checked}).eq("id", it["id"]).execute()
+                    st.rerun()
+        with c2:
+            new_pl = st.text_input("Ajouter manuellement un essentiel")
+            if st.button("Ajouter au placard") and new_pl:
+                supabase.table("placard").insert({"nom": new_pl.strip().capitalize(), "en_stock": True}).execute()
                 st.rerun()
-    with c2:
-        new_item = st.text_input("Nouvel ingrédient permanent")
-        if st.button("Ajouter à la liste") and new_item:
-            c.execute("INSERT OR IGNORE INTO placard (nom, en_stock) VALUES (?, 1)", (new_item.strip(),))
-            conn.commit()
-            st.rerun()
-    conn.close()

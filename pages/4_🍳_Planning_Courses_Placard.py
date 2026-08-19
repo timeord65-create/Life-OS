@@ -2,10 +2,12 @@ import streamlit as st
 import json
 import os
 import re
+import urllib.parse
 from datetime import datetime
 import yt_dlp
 from google import genai
 from supabase import create_client, Client
+import sqlite3
 
 st.set_page_config(page_title="Recettes & Planning Alimentation", page_icon="🍳", layout="wide")
 
@@ -27,30 +29,48 @@ supabase = get_supabase()
 
 st.title("🍳 Hub Alimentation : Recettes, Planning & Courses")
 
-if not supabase:
-    st.warning("⚠️ Supabase n'est pas configuré. Vérifiez vos secrets `SUPABASE_URL` et `SUPABASE_KEY`.")
-
 tab_import, tab_recettes, tab_plan, tab_courses, tab_placard = st.tabs([
     "📥 Importer (Reel / Vidéo)",
     "📖 Mes Recettes",
     "📅 Planning & Portions",
-    "🛒 Courses Intelligentes",
+    "🛒 Courses par Rayon",
     "🥫 Fond de Placard"
 ])
+
+# --- DÉFINITION DES RAYONS ---
+RAYONS_DEFAUT = [
+    "🥬 Fruits & Légumes",
+    "🥩 Boucherie & Poissonnerie",
+    "🧀 Frais & Produits Laitiers",
+    "🥫 Épicerie & Féculents",
+    "❄️ Surgelés",
+    "🧻 Hygiène & Entretien",
+    "📦 Autre"
+]
+
+SPECIAL_MEALS = [
+    "—",
+    "🥡 Restes / Tupperware",
+    "🍽️ Sortie / Restaurant",
+    "🥪 Sur le pouce / Rapide",
+    "🚫 Sauter le repas"
+]
 
 # --- FONCTIONS YT-DLP & GEMINI ---
 def extract_video_info(url: str):
     ydl_opts = {'quiet': True, 'no_warnings': True, 'skip_download': True}
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
-        return f"Titre: {info.get('title', '')}\nDescription:\n{info.get('description', '')}"
+        return f"Titre : {info.get('title', '')}\nDescription :\n{info.get('description', '')}"
 
 def parse_recipe_with_gemini(raw_text: str, api_key: str):
     client = genai.Client(api_key=api_key)
     prompt = f"""
-    Tu es un assistant culinaire expert. Analyse le texte suivant extrait d'une vidéo/Reel de cuisine.
+    Tu es un assistant culinaire expert. Analyse cette vidéo/Reel de cuisine.
     1. Extrais les détails de la recette.
-    2. Détecte et isole STRICTEMENT les ingrédients de type 'Fond de placard / Longue conservation' (huiles, vinaigres, épices, herbes sèches, sel, poivre, moutarde, sauces asiatiques, conserves, farines, sucre, miel, etc.).
+    2. Pour chaque ingrédient, normalise le nom brut, isole la quantité numérique, l'unité et attribue STRICTEMENT l'un de ces rayons :
+       ["🥬 Fruits & Légumes", "🥩 Boucherie & Poissonnerie", "🧀 Frais & Produits Laitiers", "🥫 Épicerie & Féculents", "❄️ Surgelés", "🧻 Hygiène & Entretien", "📦 Autre"]
+    3. Isole les ingrédients de type 'Fond de placard / Longue conservation' (huiles, épices, sel, vinaigres, sauces, etc.).
 
     Texte source :
     \"\"\"{raw_text}\"\"\"
@@ -59,11 +79,15 @@ def parse_recipe_with_gemini(raw_text: str, api_key: str):
     {{
         "title": "Nom de la recette",
         "portions": 2,
-        "prep_time": "15 min",
-        "calories": "450 kcal",
-        "ingredients": ["200g de poulet", "100g de riz basmati", "1 c.à.s d'huile d'olive", "1 c.à.c de paprika", "Sel", "Poivre"],
-        "placard_detected": ["Huile d'olive", "Paprika", "Sel", "Poivre"],
-        "instructions": "1. Couper le poulet. 2. Cuire avec les épices. 3. Servir avec le riz."
+        "prep_time": "20 min",
+        "calories": "500 kcal",
+        "ingredients": [
+            {{"name": "Blanc de poulet", "qty": 300, "unit": "g", "rayon": "🥩 Boucherie & Poissonnerie"}},
+            {{"name": "Riz basmati", "qty": 150, "unit": "g", "rayon": "🥫 Épicerie & Féculents"}},
+            {{"name": "Paprika", "qty": 1, "unit": "c.à.c", "rayon": "🥫 Épicerie & Féculents"}}
+        ],
+        "placard_detected": ["Paprika", "Sel", "Poivre", "Huile d'olive"],
+        "instructions": "1. Découper le poulet.\\n2. Cuire avec les épices.\\n3. Servir avec le riz."
     }}
     """
     response = client.models.generate_content(
@@ -73,7 +97,7 @@ def parse_recipe_with_gemini(raw_text: str, api_key: str):
     )
     return json.loads(response.text)
 
-# --- RÉCUPÉRATION DONNÉES CLOUD ---
+# --- CHARGEMENT DES RECETTES ---
 recipes_list = []
 if supabase:
     try:
@@ -89,17 +113,17 @@ with tab_import:
     st.subheader("📥 Importer depuis Instagram Reel, TikTok ou Shorts")
     video_url = st.text_input("Lien de la vidéo", placeholder="https://www.instagram.com/reel/...")
 
-    if st.button("🪄 Extraire et sauvegarder (Recette + Placard auto)", type="primary"):
+    if st.button("🪄 Extraire et sauvegarder", type="primary"):
         if not video_url:
             st.warning("Colle d'abord un lien vidéo valide.")
         elif not gemini_key:
-            st.error("Clé API Gemini introuvable dans les Secrets.")
+            st.error("Clé API Gemini manquante dans les Secrets.")
         else:
-            with st.spinner("Analyse par l'IA et détection du placard..."):
+            with st.spinner("Analyse par l'IA et structuration des ingrédients..."):
                 try:
                     raw_info = extract_video_info(video_url)
                     rec = parse_recipe_with_gemini(raw_info, gemini_key)
-                    
+
                     if supabase:
                         supabase.table("recipes").insert({
                             "title": rec.get("title", "Sans titre"),
@@ -112,59 +136,72 @@ with tab_import:
                             "date_added": datetime.now().strftime("%Y-%m-%d")
                         }).execute()
 
+                        # Fond de placard auto
                         detected_placard = rec.get("placard_detected", [])
                         if detected_placard:
-                            try:
-                                res_ex = supabase.table("placard").select("nom").execute()
-                                existing = [x["nom"].lower() for x in (res_ex.data or [])]
-                                for item in detected_placard:
-                                    clean = item.strip().capitalize()
-                                    if clean.lower() not in existing:
-                                        supabase.table("placard").insert({"nom": clean, "en_stock": True}).execute()
-                            except Exception:
-                                pass
+                            res_ex = supabase.table("placard").select("nom").execute()
+                            existing = [x["nom"].lower() for x in (res_ex.data or [])]
+                            for item in detected_placard:
+                                clean = item.strip().capitalize()
+                                if clean.lower() not in existing:
+                                    supabase.table("placard").insert({"nom": clean, "en_stock": True}).execute()
 
-                    st.success(f"🎉 Recette « {rec.get('title')} » enregistrée !")
-                    if rec.get("placard_detected"):
-                        st.info(f"🥫 Ajouté au fond de placard : {', '.join(rec.get('placard_detected'))}")
+                    st.success(f"Recette « {rec.get('title')} » enregistrée avec succès !")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Erreur : {e}")
+                    st.error(f"Erreur d'import : {e}")
 
 # ==========================================
-# TAB 2 : MES RECETTES
+# TAB 2 : MES RECETTES & RECHERCHE
 # ==========================================
 with tab_recettes:
-    st.subheader("📖 Mes recettes sauvegardées")
+    st.subheader("📖 Mes Recettes")
     if not recipes_list:
-        st.info("Aucune recette enregistrée pour l'instant.")
+        st.info("Aucune recette enregistrée.")
     else:
+        search_q = st.text_input("🔍 Filtrer par titre ou ingrédient", "").lower()
+        
+        filtered_recipes = []
         for r in recipes_list:
-            with st.expander(f"🍽️ **{r['title']}** ({r.get('prep_time', '')} • {r.get('calories', '')} • Base: {r.get('portions', 2)} pers.)"):
+            t = r.get("title", "").lower()
+            ings = [str(i).lower() for i in r.get("ingredients", [])]
+            if not search_q or search_q in t or any(search_q in ing for ing in ings):
+                filtered_recipes.append(r)
+
+        for r in filtered_recipes:
+            with st.expander(f"🍽️ **{r['title']}** ({r.get('prep_time', '')} • {r.get('calories', '')} • Base : {r.get('portions', 2)} pers.)"):
                 c1, c2 = st.columns(2)
                 with c1:
-                    st.markdown("**🛒 Ingrédients d'origine :**")
-                    for ing in r.get("ingredients", []):
-                        st.write(f"- {ing}")
+                    st.markdown("**🛒 Ingrédients :**")
+                    raw_ings = r.get("ingredients", [])
+                    for ing in raw_ings:
+                        if isinstance(ing, dict):
+                            qty_disp = ing.get("qty", "")
+                            unit_disp = ing.get("unit", "")
+                            name_disp = ing.get("name", "")
+                            st.write(f"- {qty_disp} {unit_disp} **{name_disp}** *({ing.get('rayon', '')})*")
+                        else:
+                            st.write(f"- {ing}")
                 with c2:
                     st.markdown("**👨‍🍳 Instructions :**")
                     st.write(r.get("instructions", ""))
                     if r.get("source_url"):
-                        st.link_button("🔗 Voir la vidéo", r["source_url"])
-                
-                if st.button("🗑️ Supprimer", key=f"del_rec_{r['id']}"):
+                        st.link_button("🔗 Vidéo d'origine", r["source_url"])
+
+                if st.button("🗑️ Supprimer cette recette", key=f"del_rec_{r['id']}"):
                     if supabase:
                         supabase.table("recipes").delete().eq("id", r["id"]).execute()
                         st.rerun()
 
 # ==========================================
-# TAB 3 : PLANNING SEMAINE & PORTIONS
+# TAB 3 : PLANNING & OPTIONS SPÉCIALES
 # ==========================================
 with tab_plan:
-    st.subheader("📅 Planning des repas & Nombre de personnes")
+    st.subheader("📅 Planning de la semaine")
     days = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
-    all_titles = [r["title"] for r in recipes_list]
-    
+    recipe_titles = [r["title"] for r in recipes_list]
+    all_choices = SPECIAL_MEALS + recipe_titles
+
     plan_data = {}
     if supabase:
         try:
@@ -176,7 +213,7 @@ with tab_plan:
                 }
         except Exception:
             pass
-            
+
     c_a, c_b = st.columns(2)
     for idx, day in enumerate(days):
         col = c_a if idx < 4 else c_b
@@ -185,35 +222,33 @@ with tab_plan:
                 # Midi
                 m_info = plan_data.get((day, "Midi"), {"recipe": "—", "portions": 2})
                 col_m1, col_m2 = st.columns([3, 1])
-                opts = ["—"] + all_titles
-                new_m_rec = col_m1.selectbox(f"{day} - Midi", opts, index=opts.index(m_info["recipe"]) if m_info["recipe"] in opts else 0, key=f"p_{day}_m_rec")
-                new_m_port = col_m2.number_input("Pers.", min_value=1, max_value=12, value=int(m_info["portions"]), key=f"p_{day}_m_port")
-                
+                idx_m = all_choices.index(m_info["recipe"]) if m_info["recipe"] in all_choices else 0
+                new_m_rec = col_m1.selectbox(f"{day} - Midi", all_choices, index=idx_m, key=f"plan_{day}_m_rec")
+                new_m_port = col_m2.number_input("Pers.", min_value=1, max_value=12, value=int(m_info["portions"]), key=f"plan_{day}_m_port")
+
                 # Soir
                 s_info = plan_data.get((day, "Soir"), {"recipe": "—", "portions": 2})
                 col_s1, col_s2 = st.columns([3, 1])
-                new_s_rec = col_s1.selectbox(f"{day} - Soir", opts, index=opts.index(s_info["recipe"]) if s_info["recipe"] in opts else 0, key=f"p_{day}_s_rec")
-                new_s_port = col_s2.number_input("Pers.", min_value=1, max_value=12, value=int(s_info["portions"]), key=f"p_{day}_s_port")
-                
-                if (new_m_rec != m_info["recipe"] or new_m_port != m_info["portions"] or 
+                idx_s = all_choices.index(s_info["recipe"]) if s_info["recipe"] in all_choices else 0
+                new_s_rec = col_s1.selectbox(f"{day} - Soir", all_choices, index=idx_s, key=f"plan_{day}_s_rec")
+                new_s_port = col_s2.number_input("Pers.", min_value=1, max_value=12, value=int(s_info["portions"]), key=f"plan_{day}_s_port")
+
+                if (new_m_rec != m_info["recipe"] or new_m_port != m_info["portions"] or
                     new_s_rec != s_info["recipe"] or new_s_port != s_info["portions"]):
                     if supabase:
-                        try:
-                            supabase.table("meal_plan").delete().eq("day_of_week", day).execute()
-                            if new_m_rec != "—":
-                                supabase.table("meal_plan").insert({"day_of_week": day, "meal_time": "Midi", "recipe_title": new_m_rec, "portions": new_m_port}).execute()
-                            if new_s_rec != "—":
-                                supabase.table("meal_plan").insert({"day_of_week": day, "meal_time": "Soir", "recipe_title": new_s_rec, "portions": new_s_port}).execute()
-                            st.rerun()
-                        except Exception:
-                            pass
+                        supabase.table("meal_plan").delete().eq("day_of_week", day).execute()
+                        if new_m_rec != "—":
+                            supabase.table("meal_plan").insert({"day_of_week": day, "meal_time": "Midi", "recipe_title": new_m_rec, "portions": new_m_port}).execute()
+                        if new_s_rec != "—":
+                            supabase.table("meal_plan").insert({"day_of_week": day, "meal_time": "Soir", "recipe_title": new_s_rec, "portions": new_s_port}).execute()
+                        st.rerun()
 
 # ==========================================
-# TAB 4 : LISTE DE COURSES GROUPÉE & ADDITIONNÉE
+# TAB 4 : COURSES TRIÉES PAR RAYON & EXPORT
 # ==========================================
 with tab_courses:
-    st.subheader("🛒 Liste de courses intelligente (Ingrédients cumulés)")
-    
+    st.subheader("🛒 Liste de courses triée par rayon")
+
     placard_items = []
     if supabase:
         try:
@@ -224,114 +259,154 @@ with tab_courses:
 
     rec_by_title = {r["title"]: r for r in recipes_list}
 
-    # Fonction pour parser une chaîne d'ingrédient
-    def parse_ingredient_line(line: str):
-        pattern = r'^\s*(\d+(?:[\.,]\d+)?)\s*(kg|g|mg|l|cl|ml|c\.à\.s|cas|c\.à\.c|cac|cuillères? à soupe|cuillères? à café|gousses?|tranches?|boîtes?|sachets?|pots?|pièces?|morceaux?|verres?|pincées?)?\s*(?:de\s+|d\'\s+)?(.*)$'
-        match = re.match(pattern, line.strip(), re.IGNORECASE)
-        if match:
-            qty_str, unit, name = match.groups()
-            qty = float(qty_str.replace(',', '.'))
-            unit = unit.strip() if unit else ""
-            name = name.strip()
-            return qty, unit, name
-        return None, "", line.strip()
-
-    # Dictionnaire de consolidation des ingrédients
-    # Clé: (nom_normalisé, unité) -> Données
+    # Consolidation structurée
     consolidated = {}
+
+    def parse_legacy_line(line: str):
+        pat = r'^\s*(\d+(?:[\.,]\d+)?)\s*(kg|g|mg|l|cl|ml|c\.à\.s|cas|c\.à\.c|cac|gousses?|tranches?|boîtes?|pièces?|morceaux?)?\s*(?:de\s+|d\'\s+)?(.*)$'
+        m = re.match(pat, line.strip(), re.IGNORECASE)
+        if m:
+            q_s, u, n = m.groups()
+            return float(q_s.replace(',', '.')), (u or "").strip(), n.strip(), "📦 Autre"
+        return None, "", line.strip(), "📦 Autre"
 
     for (day, meal_time), meal_val in plan_data.items():
         rec_name = meal_val["recipe"]
         planned_portions = meal_val["portions"]
-        
+
         if rec_name in rec_by_title:
             r = rec_by_title[rec_name]
             base_portions = r.get("portions", 2) or 2
             ratio = planned_portions / base_portions
-            
+
             for raw_ing in r.get("ingredients", []):
-                # Vérifier si l'ingrédient est déjà dans le fond de placard
-                if any(p in raw_ing.lower() for p in placard_items):
+                if isinstance(raw_ing, dict):
+                    name = raw_ing.get("name", "").strip()
+                    qty = raw_ing.get("qty")
+                    unit = raw_ing.get("unit", "").strip()
+                    rayon = raw_ing.get("rayon", "📦 Autre")
+                else:
+                    qty, unit, name, rayon = parse_legacy_line(raw_ing)
+
+                # Éviter ce qui est déjà en stock au placard
+                if any(p in name.lower() for p in placard_items):
                     continue
-                
-                qty, unit, name = parse_ingredient_line(raw_ing)
-                clean_key = name.lower() if name else raw_ing.lower()
-                unit_key = unit.lower()
-                
-                dict_key = (clean_key, unit_key)
-                
-                if dict_key not in consolidated:
-                    consolidated[dict_key] = {
-                        "name": name if name else raw_ing,
+
+                clean_name_key = name.lower()
+                clean_unit_key = unit.lower()
+                key = (rayon, clean_name_key, clean_unit_key)
+
+                if key not in consolidated:
+                    consolidated[key] = {
+                        "rayon": rayon,
+                        "name": name.capitalize(),
                         "unit": unit,
                         "total_qty": 0.0 if qty is not None else None,
                         "meals": []
                     }
-                
-                if qty is not None:
-                    consolidated[dict_key]["total_qty"] += (qty * ratio)
-                
-                meal_desc = f"{rec_name} ({day} {meal_time}, {planned_portions}p)"
-                if meal_desc not in consolidated[dict_key]["meals"]:
-                    consolidated[dict_key]["meals"].append(meal_desc)
 
-    if not consolidated:
-        st.info("Aucun ingrédient à acheter (ou tous les ingrédients sont déjà dans ton Fond de Placard).")
+                if qty is not None:
+                    consolidated[key]["total_qty"] += (float(qty) * ratio)
+
+                meal_label = f"{rec_name} ({day[:3]} {meal_time})"
+                if meal_label not in consolidated[key]["meals"]:
+                    consolidated[key]["meals"].append(meal_label)
+
+    # Initialisation session_state pour ajouts manuels hors-recettes
+    if "extra_courses" not in st.session_state:
+        st.session_state["extra_courses"] = []
+
+    # Affichage groupé par Rayon
+    if not consolidated and not st.session_state["extra_courses"]:
+        st.info("Aucun ingrédient à acheter pour les repas sélectionnés.")
     else:
-        st.write(f"🛒 **{len(consolidated)} articles regroupés à acheter pour la semaine :**")
-        
-        for idx, ((c_name, c_unit), item_data) in enumerate(sorted(consolidated.items(), key=lambda x: x[1]["name"])):
-            qty_val = item_data["total_qty"]
-            name_val = item_data["name"].capitalize()
-            unit_val = item_data["unit"]
-            meals_list = item_data["meals"]
-            
-            # Formatage propre du texte
-            if qty_val is not None:
-                qty_display = str(int(qty_val)) if qty_val.is_integer() else f"{qty_val:.1f}"
-                if unit_val:
-                    label = f"**{qty_display} {unit_val}** de {name_val}"
-                else:
-                    label = f"**{qty_display}** {name_val}"
-            else:
-                label = f"**{name_val}**"
-            
-            sub_info = f" *(Prévu pour : {', '.join(meals_list)})*"
-            st.checkbox(f"{label}{sub_info}", key=f"buy_grouped_{idx}")
-            
+        # Construction du texte pour export WhatsApp
+        export_text_lines = ["🛒 *LISTE DE COURSES DU FOYER*\n"]
+
+        # Organiser par rayon
+        items_by_rayon = {}
+        for (rayon, _, _), val in consolidated.items():
+            items_by_rayon.setdefault(rayon, []).append(val)
+
+        for rayon in RAYONS_DEFAUT:
+            auto_items = items_by_rayon.get(rayon, [])
+            extra_items = [x for x in st.session_state["extra_courses"] if x["rayon"] == rayon]
+
+            if auto_items or extra_items:
+                st.markdown(f"### {rayon}")
+                export_text_lines.append(f"\n*{rayon.upper()}*")
+
+                for it in auto_items:
+                    q = it["total_qty"]
+                    u = it["unit"]
+                    n = it["name"]
+                    m = ", ".join(it["meals"])
+
+                    if q is not None:
+                        q_str = str(int(q)) if q.is_integer() else f"{q:.1f}"
+                        label = f"**{q_str} {u}** {n}" if u else f"**{q_str}** {n}"
+                    else:
+                        label = f"**{n}**"
+
+                    st.checkbox(f"{label}  — *(Pour : {m})*", key=f"chk_rec_{rayon}_{n}")
+                    export_text_lines.append(f"• {label.replace('**', '')} ({m})")
+
+                for idx_e, ex in enumerate(extra_items):
+                    st.checkbox(f"**{ex['name']}** *(Ajout maison)*", key=f"chk_extra_{rayon}_{idx_e}")
+                    export_text_lines.append(f"• {ex['name']}")
+
         st.divider()
-        st.markdown("### 💳 Valider mes courses")
-        montant_ticket = st.number_input("Montant total du ticket de caisse (€)", min_value=0.0, step=5.0, value=45.0)
-        if st.button("Valider et ajouter aux dépenses du mois", type="primary"):
-            conn = sqlite3.connect("life_os.db")
-            c = conn.cursor()
-            c.execute("INSERT INTO transactions (type, category, amount, date) VALUES ('Dépense', 'Alimentation', ?, date('now'))", (montant_ticket,))
-            conn.commit()
-            conn.close()
-            st.success(f"Dépense de {montant_ticket:.2f} € enregistrée dans l'onglet Finances !")
+
+        # Export WhatsApp & Presse-papier
+        full_export_text = "\n".join(export_text_lines)
+        encoded_text = urllib.parse.quote(full_export_text)
+        wa_url = f"https://api.whatsapp.com/send?text={encoded_text}"
+
+        col_w1, col_w2 = st.columns(2)
+        with col_w1:
+            st.link_button("📲 Partager la liste sur WhatsApp", wa_url, use_container_width=True)
+        with col_w2:
+            with st.expander("📋 Copier le texte formaté"):
+                st.text_area("Texte prêt à copier", full_export_text, height=180)
+
+    st.divider()
+
+    # Ajout rapide hors-recettes
+    st.markdown("### ➕ Ajouter un article hors-recette (Hygiène, Café, Fruits...)")
+    col_ad1, col_ad2, col_ad3 = st.columns([2, 2, 1])
+    new_item_name = col_ad1.text_input("Nom de l'article", placeholder="Liquide vaisselle, Bananes...")
+    new_item_rayon = col_ad2.selectbox("Rayon", RAYONS_DEFAUT)
+    if col_ad3.button("Ajouter", use_container_width=True) and new_item_name:
+        st.session_state["extra_courses"].append({"name": new_item_name.strip(), "rayon": new_item_rayon})
+        st.rerun()
+
+    if st.session_state["extra_courses"]:
+        if st.button("Vider les articles hors-recettes"):
+            st.session_state["extra_courses"] = []
+            st.rerun()
 
 # ==========================================
 # TAB 5 : FOND DE PLACARD
 # ==========================================
 with tab_placard:
-    st.subheader("🥫 Fond de Placard (Ingrédients permanents & Épices)")
-    st.caption("Ces ingrédients sont exclus automatiquement de la liste de courses tant qu'ils sont cochés 'En stock'.")
-    
+    st.subheader("🥫 Fond de Placard (Ingrédients permanents)")
+    st.caption("Ces ingrédients sont exclus de la liste de courses tant qu'ils sont cochés.")
+
     if supabase:
         try:
             res_all_pl = supabase.table("placard").select("*").order("nom").execute()
             items = res_all_pl.data or []
-            
+
             c1, c2 = st.columns([2, 1])
             with c1:
                 for it in items:
-                    checked = st.checkbox(f"**{it['nom']}**", value=it["en_stock"], key=f"pl_it_{it['id']}")
-                    if checked != it["en_stock"]:
-                        supabase.table("placard").update({"en_stock": checked}).eq("id", it["id"]).execute()
+                    chk = st.checkbox(f"**{it['nom']}**", value=it["en_stock"], key=f"pl_item_{it['id']}")
+                    if chk != it["en_stock"]:
+                        supabase.table("placard").update({"en_stock": chk}).eq("id", it["id"]).execute()
                         st.rerun()
             with c2:
-                new_pl = st.text_input("Ajouter manuellement un essentiel")
-                if st.button("Ajouter au placard") and new_pl:
+                new_pl = st.text_input("Ajouter un essentiel")
+                if st.button("Ajouter") and new_pl:
                     supabase.table("placard").insert({"nom": new_pl.strip().capitalize(), "en_stock": True}).execute()
                     st.rerun()
         except Exception as e:

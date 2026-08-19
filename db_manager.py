@@ -47,22 +47,40 @@ def init_db():
     except Exception:
         pass
 
+def get_title_for_level(lvl: int) -> str:
+    """Attribue un rang RPG selon le niveau."""
+    if lvl < 3:
+        return "🌱 Débutant"
+    elif lvl < 6:
+        return "⚔️ Aventurier"
+    elif lvl < 10:
+        return "🛡️ Chevalier"
+    elif lvl < 15:
+        return "🔥 Champion"
+    else:
+        return "👑 Légende"
+
 def get_profile():
-    """Récupère l'XP et le niveau depuis Supabase."""
+    """Récupère l'XP, le niveau et le titre RPG depuis Supabase."""
     client = get_supabase_client()
+    default_prof = {"id": 1, "xp": 0, "level": 1, "title": "🌱 Débutant"}
     if not client:
-        return {"xp": 0, "level": 1}
+        return default_prof
     try:
         res = client.table("user_profile").select("*").eq("id", 1).execute()
         if res.data:
-            return res.data[0]
+            p = res.data[0]
+            lvl = p.get("level", 1) or 1
+            p["title"] = p.get("title") or get_title_for_level(lvl)
+            return p
         init_data = {"id": 1, "xp": 0, "level": 1}
         client.table("user_profile").insert(init_data).execute()
+        init_data["title"] = "🌱 Débutant"
         return init_data
     except Exception:
-        return {"xp": 0, "level": 1}
+        return default_prof
 
-# Alias pour compatibilité
+# Alias de compatibilité
 get_user_profile = get_profile
 
 def add_xp(amount: int):

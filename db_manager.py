@@ -3,7 +3,6 @@ import sqlite3
 import streamlit as st
 from supabase import create_client, Client
 
-# --- CONSTANTES & CONFIGURATION ---
 DB_FILE = "life_os.db"
 
 def get_secret(key: str, default: str = None):
@@ -14,7 +13,6 @@ def get_secret(key: str, default: str = None):
 supabase_url = get_secret("SUPABASE_URL")
 supabase_key = get_secret("SUPABASE_KEY")
 
-@st.cache_resource
 def get_supabase_client():
     if supabase_url and supabase_key:
         try:
@@ -24,12 +22,9 @@ def get_supabase_client():
     return None
 
 def get_connection():
-    """Retourne une connexion vers la base SQLite locale."""
     return sqlite3.connect(DB_FILE)
 
-# --- INITIALISATION LOCALE ---
 def init_db():
-    """Crée les tables SQLite locales si inexistantes."""
     try:
         conn = get_connection()
         c = conn.cursor()
@@ -63,7 +58,6 @@ def init_db():
     except Exception:
         pass
 
-# --- GESTION PROFIL RPG & XP ---
 def get_title_for_level(lvl: int) -> str:
     if lvl < 3:
         return "🌱 Débutant"
@@ -79,7 +73,6 @@ def get_title_for_level(lvl: int) -> str:
         return "⚡ Légende"
 
 class SafeProfileDict(dict):
-    """Dictionnaire sécurisé : renvoie 0 au lieu de lever une KeyError."""
     def __missing__(self, key):
         return 0
 
@@ -116,16 +109,16 @@ def get_profile() -> SafeProfileDict:
         res = client.table("user_profile").select("*").eq("id", 1).execute()
         if res.data and len(res.data) > 0:
             return format_profile_dict(res.data[0])
-        init_raw = {"id": 1, "xp": 0, "level": 1, "streak": 0}
+        init_raw = {"id": 1, "xp": 0, "level": 1, "streak": 0, "title": "🌱 Débutant", "avatar": "🧙‍♂️"}
         client.table("user_profile").insert(init_raw).execute()
         return format_profile_dict(init_raw)
     except Exception:
         return format_profile_dict()
 
-# Alias de compatibilité
 get_user_profile = get_profile
 
 def add_xp(amount: int):
+    """Ajoute de l'XP, met à jour Supabase et retourne les nouvelles valeurs."""
     client = get_supabase_client()
     prof = get_profile()
     new_total_xp = prof["total_xp"] + amount
@@ -139,13 +132,12 @@ def add_xp(amount: int):
                 "xp": new_total_xp,
                 "level": new_level,
                 "title": new_title
-            }).execute()
+            }, on_conflict="id").execute()
         except Exception as e:
             print(f"Erreur update XP : {e}")
 
     return new_total_xp, new_level
 
-# --- FONCTIONS UTILITAIRES SQLITE ---
 def add_transaction(t_type: str, category: str, amount: float, date_str: str):
     conn = get_connection()
     c = conn.cursor()

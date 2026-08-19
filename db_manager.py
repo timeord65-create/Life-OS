@@ -3,10 +3,10 @@ import sqlite3
 import streamlit as st
 from supabase import create_client, Client
 
-def get_secret(key: str):
+def get_secret(key: str, default: str = None):
     if key in st.secrets:
         return st.secrets[key]
-    return os.getenv(key)
+    return os.getenv(key, default)
 
 supabase_url = get_secret("SUPABASE_URL")
 supabase_key = get_secret("SUPABASE_KEY")
@@ -21,7 +21,7 @@ def get_supabase_client():
     return None
 
 def init_db():
-    """Initialise les tables locales de secours si nécessaire."""
+    """Initialisation de secours locale (SQLite) si besoin."""
     try:
         conn = sqlite3.connect("life_os.db")
         c = conn.cursor()
@@ -42,13 +42,20 @@ def init_db():
                 frequency TEXT
             )
         """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT,
+                priority TEXT,
+                done INTEGER DEFAULT 0
+            )
+        """)
         conn.commit()
         conn.close()
     except Exception:
         pass
 
 def get_title_for_level(lvl: int) -> str:
-    """Attribue un rang RPG selon le niveau."""
     if lvl < 3:
         return "🌱 Débutant"
     elif lvl < 6:
@@ -57,15 +64,17 @@ def get_title_for_level(lvl: int) -> str:
         return "🛡️ Chevalier"
     elif lvl < 15:
         return "🔥 Champion"
+    elif lvl < 25:
+        return "👑 Maître"
     else:
-        return "👑 Légende"
+        return "⚡ Légende"
 
 def format_profile_dict(raw: dict = None) -> dict:
-    """Construit un dictionnaire complet avec toutes les variables attendues par l'interface."""
+    """Garantit la présence de toutes les clés d'affichage du profil."""
     raw = raw or {}
-    total_xp = int(raw.get("xp", 0) or 0)
+    total_xp = int(raw.get("xp", 0) or raw.get("total_xp", 0) or 0)
     xp_per_level = 100
-    level = max(1, (total_xp // xp_per_level) + 1)
+    level = int(raw.get("level", 0) or max(1, (total_xp // xp_per_level) + 1))
     xp_in_level = total_xp % xp_per_level
     streak = int(raw.get("streak", 0) or 0)
 
@@ -78,21 +87,21 @@ def format_profile_dict(raw: dict = None) -> dict:
         "level": level,
         "title": raw.get("title") or get_title_for_level(level),
         "streak": streak,
-        "avatar": raw.get("avatar", "🧙‍♂️")
+        "avatar": raw.get("avatar", "🧙‍♂️"),
+        "points": total_xp,
+        "rank": raw.get("rank") or get_title_for_level(level)
     }
 
 def get_profile() -> dict:
-    """Récupère le profil complet depuis Supabase avec repli sécurisé."""
+    """Récupère le profil Supabase avec toutes les clés verrouillées."""
     client = get_supabase_client()
     if not client:
         return format_profile_dict()
     try:
         res = client.table("user_profile").select("*").eq("id", 1).execute()
-        if res.data:
+        if res.data and len(res.data) > 0:
             return format_profile_dict(res.data[0])
-        
-        # Insertion d'une ligne initiale si la table est vide
-        init_raw = {"id": 1, "xp": 0, "level": 1}
+        init_raw = {"id": 1, "xp": 0, "level": 1, "streak": 0}
         client.table("user_profile").insert(init_raw).execute()
         return format_profile_dict(init_raw)
     except Exception:
@@ -102,18 +111,20 @@ def get_profile() -> dict:
 get_user_profile = get_profile
 
 def add_xp(amount: int):
-    """Ajoute de l'XP et recalcule le profil."""
+    """Ajoute de l'XP et met à jour le profil."""
     client = get_supabase_client()
     prof = get_profile()
     new_total_xp = prof["total_xp"] + amount
     new_level = max(1, (new_total_xp // 100) + 1)
+    new_title = get_title_for_level(new_level)
 
     if client:
         try:
             client.table("user_profile").upsert({
                 "id": 1,
                 "xp": new_total_xp,
-                "level": new_level
+                "level": new_level,
+                "title": new_title
             }).execute()
         except Exception as e:
             print(f"Erreur update XP : {e}")

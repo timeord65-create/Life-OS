@@ -47,7 +47,7 @@ def init_db():
     except Exception:
         pass
 
-def get_user_profile():
+def get_profile():
     """Récupère l'XP et le niveau depuis Supabase."""
     client = get_supabase_client()
     if not client:
@@ -62,13 +62,16 @@ def get_user_profile():
     except Exception:
         return {"xp": 0, "level": 1}
 
+# Alias pour compatibilité
+get_user_profile = get_profile
+
 def add_xp(amount: int):
     """Ajoute de l'XP et recalcule le niveau automatiquement."""
     client = get_supabase_client()
     if not client:
         return 0, 1
 
-    profile = get_user_profile()
+    profile = get_profile()
     current_xp = profile.get("xp", 0) + amount
     new_level = max(1, (current_xp // 100) + 1)
 

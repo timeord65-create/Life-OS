@@ -8,7 +8,7 @@ import yt_dlp
 from google import genai
 import db_manager as db
 
-st.set_page_config(page_title="Hub Alimentation & Accès PIN", page_icon="🍳", layout="wide")
+st.set_page_config(page_title="Hub Alimentation", page_icon="🍳", layout="wide")
 
 supabase = db.get_supabase_client()
 gemini_key = db.get_secret("GEMINI_API_KEY")
@@ -18,26 +18,24 @@ PIN_ADMIN = str(db.get_secret("PIN_ADMIN", "0000"))
 PIN_COLOC = str(db.get_secret("PIN_COLOC", "1234"))
 PIN_MAISON = str(db.get_secret("PIN_MAISON", "5678"))
 
-# Mapping des espaces disponibles selon les permissions
 SPACE_CONFIG = {
     "coloc": "🏢 Coloc",
     "maison": "🏠 Maison",
     "perso": "👤 Perso"
 }
 
-# --- GESTION DU LOGIN PAR PIN (SIDEBAR) ---
+# --- GESTION DU PIN & MASQUAGE DU MENU ---
 with st.sidebar:
     st.markdown("### 🔐 Accès Espace")
-    user_pin = st.text_input("Entre ton code PIN :", type="password", placeholder="••••", key="auth_pin_input")
+    user_pin = st.text_input("Code PIN :", type="password", placeholder="••••", key="auth_pin_input")
 
-    # Détermination du rôle et des espaces autorisés
     current_role = None
     allowed_spaces = []
 
     if user_pin == PIN_ADMIN:
         current_role = "Admin"
         allowed_spaces = ["coloc", "maison", "perso"]
-        st.success("👑 Accès Admin (Tous les espaces)")
+        st.success("👑 Accès Admin (Tous espaces)")
     elif user_pin == PIN_COLOC:
         current_role = "Coloc"
         allowed_spaces = ["coloc"]
@@ -49,17 +47,10 @@ with st.sidebar:
     elif user_pin:
         st.error("❌ Code PIN incorrect")
 
-    # Sélecteur d'espace conditionnel
     if allowed_spaces:
         if len(allowed_spaces) > 1:
             space_labels = {k: SPACE_CONFIG[k] for k in allowed_spaces}
-            selected_label = st.radio(
-                "Changer d'espace :",
-                list(space_labels.values()),
-                index=0,
-                key="active_space_radio"
-            )
-            # Retrouver la clé interne
+            selected_label = st.radio("Changer d'espace :", list(space_labels.values()), index=0, key="active_space_radio")
             current_space = [k for k, v in space_labels.items() if v == selected_label][0]
             current_space_label = selected_label
         else:
@@ -70,14 +61,25 @@ with st.sidebar:
         current_space = None
         current_space_label = None
 
-# --- ÉCRAN DE VERROUILLAGE SI AUCUN PIN VALIDE ---
+# --- MASQUER LA NAVIGATION GAUCHE SI CE N'EST PAS TOI (ADMIN) ---
+if current_role != "Admin":
+    st.markdown("""
+        <style>
+            /* Masque la liste des autres pages dans la sidebar */
+            [data-testid="stSidebarNav"] {
+                display: none !important;
+            }
+        </style>
+    """, unsafe_allow_html=True)
+
+# --- SI PAS DE PIN VALIDE ---
 if not current_space:
     st.title("🍳 Hub Alimentation")
-    st.warning("🔒 Veuillez entrer votre code PIN dans le menu de gauche pour déverrouiller votre espace de cuisine.")
+    st.warning("🔒 Entre ton code PIN dans le menu à gauche pour afficher les recettes et le planning.")
     st.stop()
 
 # ==========================================
-# ESPACE CUISINE DÉVERROUILLÉ
+# ESPACE DÉVERROUILLÉ
 # ==========================================
 st.title(f"🍳 Hub Alimentation — {current_space_label}")
 
@@ -146,7 +148,7 @@ def parse_recipe_with_gemini(raw_text: str, api_key: str):
     )
     return json.loads(response.text)
 
-# --- CHARGEMENT DONNÉES FILTRÉES PAR L'ESPACE ACTIF ---
+# --- CHARGEMENT DONNÉES FILTRÉES ---
 user_folders = []
 recipes_list = []
 

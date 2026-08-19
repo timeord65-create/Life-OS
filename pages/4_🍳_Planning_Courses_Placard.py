@@ -24,10 +24,10 @@ SPACE_CONFIG = {
     "perso": "👤 Perso"
 }
 
-# --- GESTION DU PIN & MASQUAGE DU MENU ---
+# --- GESTION DU LOGIN PAR PIN (SIDEBAR) ---
 with st.sidebar:
     st.markdown("### 🔐 Accès Espace")
-    user_pin = st.text_input("Code PIN :", type="password", placeholder="••••", key="auth_pin_input")
+    user_pin = st.text_input("Code PIN :", type="password", placeholder="••••", key="auth_pin_cuisine")
 
     current_role = None
     allowed_spaces = []
@@ -61,7 +61,7 @@ with st.sidebar:
         current_space = None
         current_space_label = None
 
-# Masquer la navigation globale pour les utilisateurs non-admin
+# Masquer la navigation globale de l'app si ce n'est pas l'Admin
 if current_role != "Admin":
     st.markdown("""
         <style>
@@ -71,10 +71,10 @@ if current_role != "Admin":
         </style>
     """, unsafe_allow_html=True)
 
-# Si pas de PIN valide
+# Si aucun PIN valide n'est saisi
 if not current_space:
     st.title("🍳 Hub Alimentation")
-    st.warning("🔒 Entre ton code PIN dans le menu à gauche pour afficher les recettes et le planning.")
+    st.warning("🔒 Entre ton code PIN dans le menu de gauche pour déverrouiller ton espace de cuisine.")
     st.stop()
 
 # ==========================================
@@ -107,7 +107,6 @@ SPECIAL_MEALS = [
     "🍽️ Sortie / Restaurant"
 ]
 
-# --- FONCTIONS YT-DLP & GEMINI ---
 def extract_video_info(url: str):
     ydl_opts = {'quiet': True, 'no_warnings': True, 'skip_download': True}
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -147,7 +146,7 @@ def parse_recipe_with_gemini(raw_text: str, api_key: str):
     )
     return json.loads(response.text)
 
-# --- CHARGEMENT DES DOSSIERS & RECETTES FILTRÉES ---
+# Chargement données filtrées
 user_folders = []
 recipes_list = []
 
@@ -160,10 +159,7 @@ if supabase:
 
     try:
         res_all_r = supabase.table("recipes").select("*").order("id", desc=True).execute()
-        all_r_data = res_all_r.data or []
-        
-        # Filtre les recettes visibles dans cet espace
-        for r in all_r_data:
+        for r in (res_all_r.data or []):
             r_spaces = r.get("spaces") or []
             if isinstance(r_spaces, str):
                 try:
@@ -173,7 +169,6 @@ if supabase:
             if not isinstance(r_spaces, list):
                 r_spaces = [r.get("space", "coloc")]
             
-            # Si la recette est disponible dans l'espace courant
             if current_space in r_spaces or r.get("space") == current_space:
                 r["spaces"] = r_spaces
                 recipes_list.append(r)
@@ -230,7 +225,7 @@ with tab_recettes:
             unclassified_recipes.append(r)
 
     if not user_folders and not recipes_list:
-        st.info(f"Aucune recette disponible dans l'espace {current_space_label}.")
+        st.info(f"Aucun dossier ni recette enregistrée dans l'espace {current_space_label}.")
     else:
         for f_name in user_folders:
             f_recipes = folder_map.get(f_name, [])
@@ -266,7 +261,6 @@ with tab_recettes:
                         if not isinstance(curr_r_folders, list):
                             curr_r_folders = []
 
-                        # --- CONTRÔLE ADMIN / UTILISATEUR ---
                         col_mv1, col_mv2, col_mv3 = st.columns([3, 1, 1])
                         new_f_assigned = col_mv1.multiselect(
                             "Dossiers :",
@@ -276,17 +270,16 @@ with tab_recettes:
                         )
                         edit_portions = col_mv2.number_input("Portions", min_value=1, max_value=20, value=base_portions, key=f"edit_p_{current_space}_{f_name}_{r['id']}")
                         
-                        # Sélecteur d'espaces exclusif Admin
+                        # Diffusion multi-espaces pour l'admin
                         active_spaces = r.get("spaces", [current_space])
                         if current_role == "Admin":
                             st.markdown("🔄 **Diffusion dans les espaces (Admin) :**")
-                            space_options = list(SPACE_CONFIG.keys())
                             selected_spaces_for_r = st.multiselect(
                                 "Visible dans :",
-                                options=space_options,
-                                default=[sp for sp in active_spaces if sp in space_options],
+                                options=list(SPACE_CONFIG.keys()),
+                                default=[sp for sp in active_spaces if sp in SPACE_CONFIG],
                                 format_func=lambda x: SPACE_CONFIG[x],
-                                key=f"admin_spaces_assign_{r['id']}_{f_name}"
+                                key=f"spaces_assign_{r['id']}_{f_name}"
                             )
                         else:
                             selected_spaces_for_r = active_spaces
@@ -298,7 +291,7 @@ with tab_recettes:
                                     "portions": edit_portions,
                                     "spaces": selected_spaces_for_r
                                 }).eq("id", r["id"]).execute()
-                                st.success("Recette mise à jour !")
+                                st.success("Recette enregistrée !")
                                 st.rerun()
 
                         if st.button("🗑️ Supprimer la recette", key=f"del_rec_{current_space}_{f_name}_{r['id']}"):
@@ -307,7 +300,6 @@ with tab_recettes:
                                 st.rerun()
                         st.divider()
 
-        # Recettes non classées
         if unclassified_recipes:
             with st.expander(f"📂 **Recettes non classées** ({len(unclassified_recipes)})"):
                 for r in unclassified_recipes:
@@ -338,13 +330,12 @@ with tab_recettes:
                     active_spaces_u = r.get("spaces", [current_space])
                     if current_role == "Admin":
                         st.markdown("🔄 **Diffusion dans les espaces (Admin) :**")
-                        space_options = list(SPACE_CONFIG.keys())
                         selected_spaces_u = st.multiselect(
                             "Visible dans :",
-                            options=space_options,
-                            default=[sp for sp in active_spaces_u if sp in space_options],
+                            options=list(SPACE_CONFIG.keys()),
+                            default=[sp for sp in active_spaces_u if sp in SPACE_CONFIG],
                             format_func=lambda x: SPACE_CONFIG[x],
-                            key=f"admin_spaces_assign_u_{r['id']}"
+                            key=f"spaces_assign_u_{r['id']}"
                         )
                     else:
                         selected_spaces_u = active_spaces_u
@@ -375,7 +366,6 @@ with tab_import:
     target_folder = col_imp1.selectbox("📁 Ranger directement dans le dossier (optionnel)", ["— Aucun (non classé) —"] + user_folders)
     manual_portions = col_imp2.number_input("Nombre de personnes (base)", min_value=1, max_value=20, value=2)
 
-    # Si Admin, choisir où l'envoyer directement dès l'import
     if current_role == "Admin":
         initial_spaces = st.multiselect(
             "Diffuser cette recette dans :",
@@ -503,14 +493,12 @@ with tab_plan:
         col = c_a if idx < 4 else c_b
         with col:
             with st.expander(f"📍 {day}", expanded=True):
-                # Midi
                 m_info = plan_data.get((day, "Midi"), {"recipe": "—", "portions": 2})
                 col_m1, col_m2 = st.columns([3, 1])
                 idx_m = all_choices.index(m_info["recipe"]) if m_info["recipe"] in all_choices else 0
                 new_m_rec = col_m1.selectbox(f"{day} - Midi", all_choices, index=idx_m, key=f"p_{current_space}_{day}_m_r")
                 new_m_port = col_m2.number_input("Pers.", min_value=1, max_value=12, value=int(m_info["portions"]), key=f"p_{current_space}_{day}_m_p")
 
-                # Soir
                 s_info = plan_data.get((day, "Soir"), {"recipe": "—", "portions": 2})
                 col_s1, col_s2 = st.columns([3, 1])
                 idx_s = all_choices.index(s_info["recipe"]) if s_info["recipe"] in all_choices else 0

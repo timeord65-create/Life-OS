@@ -61,9 +61,15 @@ def get_title_for_level(lvl: int) -> str:
         return "👑 Légende"
 
 def get_profile():
-    """Récupère l'XP, le niveau et le titre RPG depuis Supabase."""
+    """Récupère le profil complet avec gestion de toutes les clés d'affichage."""
     client = get_supabase_client()
-    default_prof = {"id": 1, "xp": 0, "level": 1, "title": "🌱 Débutant"}
+    default_prof = {
+        "id": 1,
+        "xp": 0,
+        "level": 1,
+        "title": "🌱 Débutant",
+        "streak": 0
+    }
     if not client:
         return default_prof
     try:
@@ -71,12 +77,14 @@ def get_profile():
         if res.data:
             p = res.data[0]
             lvl = p.get("level", 1) or 1
+            p["level"] = lvl
+            p["xp"] = p.get("xp", 0) or 0
             p["title"] = p.get("title") or get_title_for_level(lvl)
+            p["streak"] = p.get("streak", 0) or 0
             return p
         init_data = {"id": 1, "xp": 0, "level": 1}
         client.table("user_profile").insert(init_data).execute()
-        init_data["title"] = "🌱 Débutant"
-        return init_data
+        return default_prof
     except Exception:
         return default_prof
 

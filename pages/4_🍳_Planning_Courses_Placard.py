@@ -7,11 +7,10 @@ from datetime import datetime
 import yt_dlp
 from google import genai
 from supabase import create_client, Client
-import sqlite3
 
 st.set_page_config(page_title="Recettes & Planning Alimentation", page_icon="🍳", layout="wide")
 
-# --- CONNEXION SUPABASE ---
+# --- CONNEXION SUPABASE & GEMINI ---
 supabase_url = os.getenv("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_KEY")
 gemini_key = os.getenv("GEMINI_API_KEY")
@@ -37,7 +36,6 @@ tab_import, tab_recettes, tab_plan, tab_courses, tab_placard = st.tabs([
     "🥫 Fond de Placard"
 ])
 
-# --- DÉFINITION DES RAYONS ---
 RAYONS_DEFAUT = [
     "🥬 Fruits & Légumes",
     "🥩 Boucherie & Poissonnerie",
@@ -56,7 +54,7 @@ SPECIAL_MEALS = [
     "🚫 Sauter le repas"
 ]
 
-# --- FONCTIONS YT-DLP & GEMINI ---
+# --- FONCTIONS EXTRACTION & GEMINI ---
 def extract_video_info(url: str):
     ydl_opts = {'quiet': True, 'no_warnings': True, 'skip_download': True}
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -68,7 +66,7 @@ def parse_recipe_with_gemini(raw_text: str, api_key: str):
     prompt = f"""
     Tu es un assistant culinaire expert. Analyse cette vidéo/Reel de cuisine.
     1. Extrais les détails de la recette.
-    2. Pour chaque ingrédient, normalise le nom brut, isole la quantité numérique, l'unité et attribue STRICTEMENT l'un de ces rayons :
+    2. Pour chaque ingrédient, normalise le nom de base, isole la quantité numérique, l'unité et attribue STRICTEMENT l'un de ces rayons :
        ["🥬 Fruits & Légumes", "🥩 Boucherie & Poissonnerie", "🧀 Frais & Produits Laitiers", "🥫 Épicerie & Féculents", "❄️ Surgelés", "🧻 Hygiène & Entretien", "📦 Autre"]
     3. Isole les ingrédients de type 'Fond de placard / Longue conservation' (huiles, épices, sel, vinaigres, sauces, etc.).
 
@@ -97,7 +95,7 @@ def parse_recipe_with_gemini(raw_text: str, api_key: str):
     )
     return json.loads(response.text)
 
-# --- CHARGEMENT DES RECETTES ---
+# --- CHARGEMENT RECETTES ---
 recipes_list = []
 if supabase:
     try:
@@ -107,7 +105,7 @@ if supabase:
         pass
 
 # ==========================================
-# TAB 1 : IMPORTER UNE RECETTE
+# TAB 1 : IMPORTER
 # ==========================================
 with tab_import:
     st.subheader("📥 Importer depuis Instagram Reel, TikTok ou Shorts")
@@ -117,9 +115,9 @@ with tab_import:
         if not video_url:
             st.warning("Colle d'abord un lien vidéo valide.")
         elif not gemini_key:
-            st.error("Clé API Gemini manquante dans les Secrets.")
+            st.error("Clé API Gemini introuvable dans les Secrets.")
         else:
-            with st.spinner("Analyse par l'IA et structuration des ingrédients..."):
+            with st.spinner("Analyse et structuration des ingrédients par l'IA..."):
                 try:
                     raw_info = extract_video_info(video_url)
                     rec = parse_recipe_with_gemini(raw_info, gemini_key)
@@ -136,7 +134,6 @@ with tab_import:
                             "date_added": datetime.now().strftime("%Y-%m-%d")
                         }).execute()
 
-                        # Fond de placard auto
                         detected_placard = rec.get("placard_detected", [])
                         if detected_placard:
                             res_ex = supabase.table("placard").select("nom").execute()
@@ -146,21 +143,21 @@ with tab_import:
                                 if clean.lower() not in existing:
                                     supabase.table("placard").insert({"nom": clean, "en_stock": True}).execute()
 
-                    st.success(f"Recette « {rec.get('title')} » enregistrée avec succès !")
+                    st.success(f"Recette « {rec.get('title')} » enregistrée !")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Erreur d'import : {e}")
 
 # ==========================================
-# TAB 2 : MES RECETTES & RECHERCHE
+# TAB 2 : MES RECETTES
 # ==========================================
 with tab_recettes:
     st.subheader("📖 Mes Recettes")
     if not recipes_list:
         st.info("Aucune recette enregistrée.")
     else:
-        search_q = st.text_input("🔍 Filtrer par titre ou ingrédient", "").lower()
-        
+        search_q = st.text_input("🔍 Filtrer par nom ou ingrédient", "").lower()
+
         filtered_recipes = []
         for r in recipes_list:
             t = r.get("title", "").lower()
@@ -173,13 +170,12 @@ with tab_recettes:
                 c1, c2 = st.columns(2)
                 with c1:
                     st.markdown("**🛒 Ingrédients :**")
-                    raw_ings = r.get("ingredients", [])
-                    for ing in raw_ings:
+                    for ing in r.get("ingredients", []):
                         if isinstance(ing, dict):
-                            qty_disp = ing.get("qty", "")
-                            unit_disp = ing.get("unit", "")
-                            name_disp = ing.get("name", "")
-                            st.write(f"- {qty_disp} {unit_disp} **{name_disp}** *({ing.get('rayon', '')})*")
+                            qty_d = ing.get("qty", "")
+                            unit_d = ing.get("unit", "")
+                            name_d = ing.get("name", "")
+                            st.write(f"- {qty_d} {unit_d} **{name_d}** *({ing.get('rayon', '')})*")
                         else:
                             st.write(f"- {ing}")
                 with c2:
@@ -194,7 +190,7 @@ with tab_recettes:
                         st.rerun()
 
 # ==========================================
-# TAB 3 : PLANNING & OPTIONS SPÉCIALES
+# TAB 3 : PLANNING
 # ==========================================
 with tab_plan:
     st.subheader("📅 Planning de la semaine")
@@ -244,7 +240,7 @@ with tab_plan:
                         st.rerun()
 
 # ==========================================
-# TAB 4 : COURSES TRIÉES PAR RAYON & EXPORT
+# TAB 4 : COURSES PAR RAYON
 # ==========================================
 with tab_courses:
     st.subheader("🛒 Liste de courses triée par rayon")
@@ -258,8 +254,6 @@ with tab_courses:
             pass
 
     rec_by_title = {r["title"]: r for r in recipes_list}
-
-    # Consolidation structurée
     consolidated = {}
 
     def parse_legacy_line(line: str):
@@ -288,7 +282,6 @@ with tab_courses:
                 else:
                     qty, unit, name, rayon = parse_legacy_line(raw_ing)
 
-                # Éviter ce qui est déjà en stock au placard
                 if any(p in name.lower() for p in placard_items):
                     continue
 
@@ -312,23 +305,18 @@ with tab_courses:
                 if meal_label not in consolidated[key]["meals"]:
                     consolidated[key]["meals"].append(meal_label)
 
-    # Initialisation session_state pour ajouts manuels hors-recettes
     if "extra_courses" not in st.session_state:
         st.session_state["extra_courses"] = []
 
-    # Affichage groupé par Rayon
     if not consolidated and not st.session_state["extra_courses"]:
         st.info("Aucun ingrédient à acheter pour les repas sélectionnés.")
     else:
-        # Construction du texte pour export WhatsApp
         export_text_lines = ["🛒 *LISTE DE COURSES DU FOYER*\n"]
-
-        # Organiser par rayon
         items_by_rayon = {}
         for (rayon, _, _), val in consolidated.items():
             items_by_rayon.setdefault(rayon, []).append(val)
 
-        for rayon in RAYONS_DEFAUT:
+        for r_idx, rayon in enumerate(RAYONS_DEFAUT):
             auto_items = items_by_rayon.get(rayon, [])
             extra_items = [x for x in st.session_state["extra_courses"] if x["rayon"] == rayon]
 
@@ -336,7 +324,7 @@ with tab_courses:
                 st.markdown(f"### {rayon}")
                 export_text_lines.append(f"\n*{rayon.upper()}*")
 
-                for it in auto_items:
+                for idx_a, it in enumerate(auto_items):
                     q = it["total_qty"]
                     u = it["unit"]
                     n = it["name"]
@@ -348,16 +336,15 @@ with tab_courses:
                     else:
                         label = f"**{n}**"
 
-                    st.checkbox(f"{label}  — *(Pour : {m})*", key=f"chk_rec_{rayon}_{n}")
+                    st.checkbox(f"{label}  — *(Pour : {m})*", key=f"chk_auto_{r_idx}_{idx_a}")
                     export_text_lines.append(f"• {label.replace('**', '')} ({m})")
 
                 for idx_e, ex in enumerate(extra_items):
-                    st.checkbox(f"**{ex['name']}** *(Ajout maison)*", key=f"chk_extra_{rayon}_{idx_e}")
+                    st.checkbox(f"**{ex['name']}** *(Ajout maison)*", key=f"chk_extra_{r_idx}_{idx_e}")
                     export_text_lines.append(f"• {ex['name']}")
 
         st.divider()
 
-        # Export WhatsApp & Presse-papier
         full_export_text = "\n".join(export_text_lines)
         encoded_text = urllib.parse.quote(full_export_text)
         wa_url = f"https://api.whatsapp.com/send?text={encoded_text}"
@@ -371,8 +358,7 @@ with tab_courses:
 
     st.divider()
 
-    # Ajout rapide hors-recettes
-    st.markdown("### ➕ Ajouter un article hors-recette (Hygiène, Café, Fruits...)")
+    st.markdown("### ➕ Ajouter un article hors-recette")
     col_ad1, col_ad2, col_ad3 = st.columns([2, 2, 1])
     new_item_name = col_ad1.text_input("Nom de l'article", placeholder="Liquide vaisselle, Bananes...")
     new_item_rayon = col_ad2.selectbox("Rayon", RAYONS_DEFAUT)

@@ -21,7 +21,7 @@ def get_supabase_client():
     return None
 
 def init_db():
-    """Initialisation de secours locale (SQLite) si besoin."""
+    """Initialisation de secours locale (SQLite)."""
     try:
         conn = sqlite3.connect("life_os.db")
         c = conn.cursor()
@@ -69,31 +69,37 @@ def get_title_for_level(lvl: int) -> str:
     else:
         return "⚡ Légende"
 
-def format_profile_dict(raw: dict = None) -> dict:
-    """Garantit la présence de toutes les clés d'affichage du profil."""
+class SafeProfileDict(dict):
+    """Dictionnaire anti-crash : renvoie une valeur par défaut si une clé manque."""
+    def __missing__(self, key):
+        return 0
+
+def format_profile_dict(raw: dict = None) -> SafeProfileDict:
     raw = raw or {}
     total_xp = int(raw.get("xp", 0) or raw.get("total_xp", 0) or 0)
     xp_per_level = 100
     level = int(raw.get("level", 0) or max(1, (total_xp // xp_per_level) + 1))
     xp_in_level = total_xp % xp_per_level
     streak = int(raw.get("streak", 0) or 0)
+    progress = min(1.0, max(0.0, float(xp_in_level) / float(xp_per_level)))
 
-    return {
+    data = {
         "id": 1,
         "xp": total_xp,
         "total_xp": total_xp,
         "xp_in_level": xp_in_level,
         "xp_needed": xp_per_level,
+        "progress": progress,
         "level": level,
         "title": raw.get("title") or get_title_for_level(level),
+        "rank": raw.get("rank") or get_title_for_level(level),
         "streak": streak,
         "avatar": raw.get("avatar", "🧙‍♂️"),
-        "points": total_xp,
-        "rank": raw.get("rank") or get_title_for_level(level)
+        "points": total_xp
     }
+    return SafeProfileDict(data)
 
-def get_profile() -> dict:
-    """Récupère le profil Supabase avec toutes les clés verrouillées."""
+def get_profile() -> SafeProfileDict:
     client = get_supabase_client()
     if not client:
         return format_profile_dict()
@@ -111,7 +117,6 @@ def get_profile() -> dict:
 get_user_profile = get_profile
 
 def add_xp(amount: int):
-    """Ajoute de l'XP et met à jour le profil."""
     client = get_supabase_client()
     prof = get_profile()
     new_total_xp = prof["total_xp"] + amount

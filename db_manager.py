@@ -123,13 +123,15 @@ def format_profile_dict(raw: dict = None) -> SafeProfileDict:
     return SafeProfileDict(data)
 
 def get_profile() -> SafeProfileDict:
+    """Récupère le profil depuis Supabase avec fallback SQLite."""
     client = get_supabase_client()
     if client:
         try:
             res = client.table("user_profile").select("*").eq("id", 1).execute()
             if res.data and len(res.data) > 0:
                 return format_profile_dict(res.data[0])
-            init_raw = {"id": 1, "xp": 0, "level": 1, "streak": 0, "title": "🌱 Débutant", "avatar": "🧙‍♂️"}
+            # Si la ligne n'existe pas encore
+            init_raw = {"id": 1, "xp": 0, "total_xp": 0, "level": 1, "streak": 0, "title": "🌱 Débutant", "avatar": "🧙‍♂️"}
             client.table("user_profile").insert(init_raw).execute()
             return format_profile_dict(init_raw)
         except Exception:
@@ -153,23 +155,28 @@ def get_profile() -> SafeProfileDict:
 get_user_profile = get_profile
 
 def add_xp(amount: int):
+    """Ajoute ou retire de l'XP et persiste immédiatement dans Supabase."""
     prof = get_profile()
     new_total_xp = max(0, prof["total_xp"] + amount)
     new_level = max(1, (new_total_xp // 100) + 1)
     new_title = get_title_for_level(new_level)
 
+    # 1. Sauvegarde Supabase
     client = get_supabase_client()
     if client:
         try:
             client.table("user_profile").upsert({
                 "id": 1,
                 "xp": new_total_xp,
+                "total_xp": new_total_xp,
                 "level": new_level,
-                "title": new_title
+                "title": new_title,
+                "updated_at": datetime.utcnow().isoformat()
             }, on_conflict="id").execute()
         except Exception as e:
             st.error(f"Erreur Supabase XP : {e}")
 
+    # 2. Sauvegarde SQLite
     try:
         conn = get_connection()
         c = conn.cursor()

@@ -402,11 +402,17 @@ with tab_plan:
 with tab_courses:
     st.subheader("🛒 Courses par Rayon")
 
-    placard_items = []
+    placard_in_stock = []
+    placard_out_of_stock = []
     if supabase:
         try:
-            res_pl = supabase.table("placard").select("nom").eq("en_stock", True).execute()
-            placard_items = [row["nom"].lower().strip() for row in (res_pl.data or [])]
+            res_pl = supabase.table("placard").select("nom, en_stock").execute()
+            for row in (res_pl.data or []):
+                nom_clean = row["nom"].strip()
+                if row.get("en_stock", True):
+                    placard_in_stock.append(nom_clean.lower())
+                else:
+                    placard_out_of_stock.append(nom_clean)
         except Exception:
             pass
 
@@ -421,6 +427,7 @@ with tab_courses:
             return float(q_s.replace(',', '.')), (u or "").strip(), n.strip(), "📦 Autre"
         return None, "", line.strip(), "📦 Autre"
 
+    # Ingrédients issus du planning
     for (day, meal_time), meal_val in plan_data.items():
         rec_name = meal_val["recipe"]
         planned_portions = meal_val["portions"]
@@ -439,7 +446,8 @@ with tab_courses:
                 else:
                     qty, unit, name, rayon = parse_legacy_line(raw_ing)
 
-                if any(p in name.lower() for p in placard_items):
+                # Si l'ingrédient est en stock dans le placard, on ne l'achète pas
+                if any(p in name.lower() for p in placard_in_stock):
                     continue
 
                 key = (rayon, name.lower(), unit.lower())
@@ -458,6 +466,18 @@ with tab_courses:
                 meal_label = f"{rec_name} ({day[:3]} {meal_time} • {planned_portions}p)"
                 if meal_label not in consolidated[key]["meals"]:
                     consolidated[key]["meals"].append(meal_label)
+
+    # Ajout des fonds de placard en RUPTURE DE STOCK (décochés)
+    for out_item in placard_out_of_stock:
+        key = ("🥫 Épicerie & Féculents", out_item.lower(), "")
+        if key not in consolidated:
+            consolidated[key] = {
+                "rayon": "🥫 Épicerie & Féculents",
+                "name": out_item.capitalize(),
+                "unit": "",
+                "total_qty": None,
+                "meals": ["🥫 Fond de placard en rupture"]
+            }
 
     if "extra_courses" not in st.session_state:
         st.session_state["extra_courses"] = []
@@ -528,6 +548,8 @@ with tab_courses:
 # ==========================================
 with tab_placard:
     st.subheader("🥫 Fond de Placard (Ingrédients permanents)")
+    st.caption("Coche les ingrédients que tu as en stock. Si tu en décoches un, il sera automatiquement ajouté à ta liste de courses !")
+
     if supabase:
         try:
             res_all_pl = supabase.table("placard").select("*").order("nom").execute()

@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import streamlit as st
 from supabase import create_client, Client
 
@@ -19,6 +20,33 @@ def get_supabase_client():
             return None
     return None
 
+def init_db():
+    """Initialise les tables locales de secours si nécessaire."""
+    try:
+        conn = sqlite3.connect("life_os.db")
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                type TEXT,
+                category TEXT,
+                amount REAL,
+                date TEXT
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS habits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT,
+                category TEXT,
+                frequency TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 def get_user_profile():
     """Récupère l'XP et le niveau depuis Supabase."""
     client = get_supabase_client()
@@ -28,7 +56,6 @@ def get_user_profile():
         res = client.table("user_profile").select("*").eq("id", 1).execute()
         if res.data:
             return res.data[0]
-        # Si la ligne n'existe pas encore
         init_data = {"id": 1, "xp": 0, "level": 1}
         client.table("user_profile").insert(init_data).execute()
         return init_data
@@ -43,8 +70,6 @@ def add_xp(amount: int):
 
     profile = get_user_profile()
     current_xp = profile.get("xp", 0) + amount
-    
-    # Formule RPG : 100 XP par niveau (ex: Niv 1: 0-99, Niv 2: 100-199...)
     new_level = max(1, (current_xp // 100) + 1)
 
     try:

@@ -8,30 +8,78 @@ import yt_dlp
 from google import genai
 import db_manager as db
 
-st.set_page_config(page_title="Hub Alimentation Multi-Espaces", page_icon="🍳", layout="wide")
+st.set_page_config(page_title="Hub Alimentation & Accès PIN", page_icon="🍳", layout="wide")
 
 supabase = db.get_supabase_client()
 gemini_key = db.get_secret("GEMINI_API_KEY")
 
-# --- SÉLECTION DE L'ESPACE (SIDEBAR) ---
-SPACES = {
-    "🏢 Coloc": "coloc",
-    "🏠 Maison": "maison",
-    "👤 Perso": "perso"
+# --- RÉCUPÉRATION DES CODES PIN ---
+PIN_ADMIN = str(db.get_secret("PIN_ADMIN", "0000"))
+PIN_COLOC = str(db.get_secret("PIN_COLOC", "1234"))
+PIN_MAISON = str(db.get_secret("PIN_MAISON", "5678"))
+
+# Mapping des espaces disponibles selon les permissions
+SPACE_CONFIG = {
+    "coloc": "🏢 Coloc",
+    "maison": "🏠 Maison",
+    "perso": "👤 Perso"
 }
 
+# --- GESTION DU LOGIN PAR PIN (SIDEBAR) ---
 with st.sidebar:
-    st.markdown("### 📍 Espace Actif")
-    selected_space_label = st.radio(
-        "Choisis ton environnement :",
-        list(SPACES.keys()),
-        index=0,
-        key="global_space_selector"
-    )
-    current_space = SPACES[selected_space_label]
-    st.info(f"Données filtrées pour : **{selected_space_label}**")
+    st.markdown("### 🔐 Accès Espace")
+    user_pin = st.text_input("Entre ton code PIN :", type="password", placeholder="••••", key="auth_pin_input")
 
-st.title(f"🍳 Hub Alimentation — {selected_space_label}")
+    # Détermination du rôle et des espaces autorisés
+    current_role = None
+    allowed_spaces = []
+
+    if user_pin == PIN_ADMIN:
+        current_role = "Admin"
+        allowed_spaces = ["coloc", "maison", "perso"]
+        st.success("👑 Accès Admin (Tous les espaces)")
+    elif user_pin == PIN_COLOC:
+        current_role = "Coloc"
+        allowed_spaces = ["coloc"]
+        st.info("🏢 Accès Colocataire")
+    elif user_pin == PIN_MAISON:
+        current_role = "Maison"
+        allowed_spaces = ["maison"]
+        st.info("🏠 Accès Maison / Famille")
+    elif user_pin:
+        st.error("❌ Code PIN incorrect")
+
+    # Sélecteur d'espace conditionnel
+    if allowed_spaces:
+        if len(allowed_spaces) > 1:
+            space_labels = {k: SPACE_CONFIG[k] for k in allowed_spaces}
+            selected_label = st.radio(
+                "Changer d'espace :",
+                list(space_labels.values()),
+                index=0,
+                key="active_space_radio"
+            )
+            # Retrouver la clé interne
+            current_space = [k for k, v in space_labels.items() if v == selected_label][0]
+            current_space_label = selected_label
+        else:
+            current_space = allowed_spaces[0]
+            current_space_label = SPACE_CONFIG[current_space]
+            st.markdown(f"**Espace actif :** {current_space_label}")
+    else:
+        current_space = None
+        current_space_label = None
+
+# --- ÉCRAN DE VERROUILLAGE SI AUCUN PIN VALIDE ---
+if not current_space:
+    st.title("🍳 Hub Alimentation")
+    st.warning("🔒 Veuillez entrer votre code PIN dans le menu de gauche pour déverrouiller votre espace de cuisine.")
+    st.stop()
+
+# ==========================================
+# ESPACE CUISINE DÉVERROUILLÉ
+# ==========================================
+st.title(f"🍳 Hub Alimentation — {current_space_label}")
 
 tab_recettes, tab_import, tab_frigo, tab_plan, tab_courses, tab_placard = st.tabs([
     "📖 Mes Recettes & Dossiers",
@@ -58,7 +106,7 @@ SPECIAL_MEALS = [
     "🍽️ Sortie / Restaurant"
 ]
 
-# --- FONCTIONS EXTRACTION & GEMINI ---
+# --- FONCTIONS YT-DLP & GEMINI ---
 def extract_video_info(url: str):
     ydl_opts = {'quiet': True, 'no_warnings': True, 'skip_download': True}
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -98,7 +146,7 @@ def parse_recipe_with_gemini(raw_text: str, api_key: str):
     )
     return json.loads(response.text)
 
-# --- CHARGEMENT DES DONNÉES FILTRÉES PAR ESPACE ---
+# --- CHARGEMENT DONNÉES FILTRÉES PAR L'ESPACE ACTIF ---
 user_folders = []
 recipes_list = []
 
@@ -119,13 +167,13 @@ if supabase:
 # TAB 1 : MES DOSSIERS & RECETTES
 # ==========================================
 with tab_recettes:
-    st.subheader(f"📁 Mes Dossiers de Recettes — {selected_space_label}")
+    st.subheader(f"📁 Dossiers & Recettes ({current_space_label})")
 
     col_search, col_add_folder = st.columns([3, 2])
     search_q = col_search.text_input("🔍 Rechercher une recette (nom ou ingrédient)", "").lower()
 
     with col_add_folder:
-        with st.popover(f"➕ Créer un dossier dans {selected_space_label}", use_container_width=True):
+        with st.popover(f"➕ Créer un dossier dans {current_space_label}", use_container_width=True):
             new_f_name = st.text_input("Nom du dossier", placeholder="Ex: Repas rapides, Plats d'hiver...")
             if st.button("Créer le dossier", type="primary") and new_f_name:
                 clean_name = new_f_name.strip()
@@ -165,7 +213,7 @@ with tab_recettes:
             unclassified_recipes.append(r)
 
     if not user_folders and not recipes_list:
-        st.info(f"Aucun dossier ni recette enregistrée dans l'espace {selected_space_label}.")
+        st.info(f"Aucun dossier ni recette enregistrée dans l'espace {current_space_label}.")
     else:
         for f_name in user_folders:
             f_recipes = folder_map.get(f_name, [])
@@ -269,7 +317,7 @@ with tab_recettes:
 # TAB 2 : IMPORTER
 # ==========================================
 with tab_import:
-    st.subheader(f"📥 Importer une recette vers : {selected_space_label}")
+    st.subheader(f"📥 Importer une recette vers : {current_space_label}")
     video_url = st.text_input("Lien de la vidéo (Reel / TikTok / Shorts)", placeholder="https://www.instagram.com/reel/...")
     
     col_imp1, col_imp2 = st.columns([2, 1])
@@ -282,7 +330,7 @@ with tab_import:
         elif not gemini_key:
             st.error("Clé API Gemini manquante dans les Secrets.")
         else:
-            with st.spinner(f"Analyse et intégration dans l'espace {selected_space_label}..."):
+            with st.spinner(f"Analyse et intégration dans {current_space_label}..."):
                 try:
                     raw_info = extract_video_info(video_url)
                     rec = parse_recipe_with_gemini(raw_info, gemini_key)
@@ -319,7 +367,7 @@ with tab_import:
 
                         db.add_xp(30)
 
-                    st.success(f"Recette « {rec.get('title')} » ({final_portions} pers.) enregistrée dans {selected_space_label} (+30 XP) !")
+                    st.success(f"Recette « {rec.get('title')} » ({final_portions} pers.) enregistrée dans {current_space_label} (+30 XP) !")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Erreur d'import : {e}")
@@ -328,8 +376,8 @@ with tab_import:
 # TAB 3 : VIDER LE FRIGO (ANTI-GASPI)
 # ==========================================
 with tab_frigo:
-    st.subheader(f"🧊 Vider le Frigo — {selected_space_label}")
-    st.caption(f"L'IA analyse tes restes en combinant avec le fond de placard de **{selected_space_label}**.")
+    st.subheader(f"🧊 Vider le Frigo — {current_space_label}")
+    st.caption(f"L'IA analyse tes restes en combinant avec le fond de placard de **{current_space_label}**.")
 
     leftover_input = st.text_input("Ingrédients restants dans ce frigo", placeholder="Ex : 2 œufs, reste de lardons, crème, courgette...")
     frigo_portions = st.number_input("Nombre de personnes pour ce repas", min_value=1, max_value=10, value=2)
@@ -350,7 +398,7 @@ with tab_frigo:
                     client = genai.Client(api_key=gemini_key)
                     prompt = f"""
                     Tu es un chef anti-gaspillage créatif et rapide.
-                    L'utilisateur est dans son espace '{selected_space_label}'.
+                    L'utilisateur est dans son espace '{current_space_label}'.
                     Restes disponibles : {leftover_input}
                     Fonds de placard disponibles : {', '.join(placard_available)}
                     Nombre de personnes : {frigo_portions}
@@ -370,7 +418,7 @@ with tab_frigo:
 # TAB 4 : PLANNING
 # ==========================================
 with tab_plan:
-    st.subheader(f"📅 Planning de la semaine — {selected_space_label}")
+    st.subheader(f"📅 Planning de la semaine — {current_space_label}")
     days = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
     recipe_titles = [r["title"] for r in recipes_list]
     all_choices = SPECIAL_MEALS + recipe_titles
@@ -420,7 +468,7 @@ with tab_plan:
 # TAB 5 : COURSES PAR RAYON
 # ==========================================
 with tab_courses:
-    st.subheader(f"🛒 Courses par Rayon — {selected_space_label}")
+    st.subheader(f"🛒 Courses par Rayon — {current_space_label}")
 
     placard_in_stock = []
     placard_out_of_stock = []
@@ -447,7 +495,6 @@ with tab_courses:
             return float(q_s.replace(',', '.')), (u or "").strip(), n.strip(), "📦 Autre"
         return None, "", line.strip(), "📦 Autre"
 
-    # Ingrédients issus du planning de l'espace actuel
     for (day, meal_time), meal_val in plan_data.items():
         rec_name = meal_val["recipe"]
         planned_portions = meal_val["portions"]
@@ -486,7 +533,6 @@ with tab_courses:
                 if meal_label not in consolidated[key]["meals"]:
                     consolidated[key]["meals"].append(meal_label)
 
-    # Ajout des fonds de placard en rupture dans cet espace
     for out_item in placard_out_of_stock:
         key = ("🥫 Épicerie & Féculents", out_item.lower(), "")
         if key not in consolidated:
@@ -503,9 +549,9 @@ with tab_courses:
         st.session_state[extra_key] = []
 
     if not consolidated and not st.session_state[extra_key]:
-        st.info(f"Aucun ingrédient à acheter pour {selected_space_label}.")
+        st.info(f"Aucun ingrédient à acheter pour {current_space_label}.")
     else:
-        export_text_lines = [f"🛒 *LISTE DE COURSES — {selected_space_label.upper()}*\n"]
+        export_text_lines = [f"🛒 *LISTE DE COURSES — {current_space_label.upper()}*\n"]
         items_by_rayon = {}
         for (rayon, _, _), val in consolidated.items():
             items_by_rayon.setdefault(rayon, []).append(val)
@@ -544,13 +590,13 @@ with tab_courses:
 
         col_w1, col_w2 = st.columns(2)
         with col_w1:
-            st.link_button(f"📲 Partager ({selected_space_label}) sur WhatsApp", wa_url, use_container_width=True)
+            st.link_button(f"📲 Partager ({current_space_label}) sur WhatsApp", wa_url, use_container_width=True)
         with col_w2:
             with st.expander("📋 Copier le texte formaté"):
                 st.text_area("Texte à copier", full_export_text, height=180)
 
     st.divider()
-    st.markdown(f"### ➕ Ajouter un article hors-recette ({selected_space_label})")
+    st.markdown(f"### ➕ Ajouter un article hors-recette ({current_space_label})")
     col_ad1, col_ad2, col_ad3 = st.columns([2, 2, 1])
     new_item_name = col_ad1.text_input("Nom de l'article", placeholder="Liquide vaisselle, Café...", key=f"inp_extra_{current_space}")
     new_item_rayon = col_ad2.selectbox("Rayon", RAYONS_DEFAUT, key=f"sel_extra_{current_space}")
@@ -567,8 +613,8 @@ with tab_courses:
 # TAB 6 : PLACARD
 # ==========================================
 with tab_placard:
-    st.subheader(f"🥫 Fond de Placard — {selected_space_label}")
-    st.caption("Coche les indispensables en stock dans cet endroit précis. Les ingrédients décochés vont dans la liste de courses de cet espace.")
+    st.subheader(f"🥫 Fond de Placard — {current_space_label}")
+    st.caption("Coche les indispensables en stock dans cet endroit. Les ingrédients décochés vont directement dans la liste de courses.")
 
     if supabase:
         try:

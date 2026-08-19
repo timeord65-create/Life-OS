@@ -40,7 +40,7 @@ SPECIAL_MEALS = [
     "🍽️ Sortie / Restaurant"
 ]
 
-# --- FONCTIONS GEMINI & EXTRACTION ---
+# --- FONCTIONS EXTRACTION & GEMINI ---
 def extract_video_info(url: str):
     ydl_opts = {'quiet': True, 'no_warnings': True, 'skip_download': True}
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -51,7 +51,7 @@ def parse_recipe_with_gemini(raw_text: str, api_key: str):
     client = genai.Client(api_key=api_key)
     prompt = f"""
     Tu es un assistant culinaire expert. Analyse cette vidéo/Reel de cuisine.
-    1. Extrais les détails de la recette.
+    1. Extrais les détails de la recette. Détermine le nombre de personnes/portions (par défaut 2 si non précisé).
     2. Pour chaque ingrédient, normalise le nom de base, isole la quantité numérique, l'unité et attribue STRICTEMENT l'un de ces rayons :
        ["🥬 Fruits & Légumes", "🥩 Boucherie & Poissonnerie", "🧀 Frais & Produits Laitiers", "🥫 Épicerie & Féculents", "❄️ Surgelés", "🧻 Hygiène & Entretien", "📦 Autre"]
     3. Isole les ingrédients de type 'Fond de placard' (huiles, épices, sel, vinaigres, sauces, condiments).
@@ -80,7 +80,7 @@ def parse_recipe_with_gemini(raw_text: str, api_key: str):
     )
     return json.loads(response.text)
 
-# --- CHARGEMENT DES DOSSIERS & RECETTES ---
+# --- CHARGEMENT DONNÉES ---
 user_folders = []
 recipes_list = []
 
@@ -103,7 +103,6 @@ if supabase:
 with tab_recettes:
     st.subheader("📁 Mes Dossiers de Recettes")
 
-    # Barre création dossier & recherche
     col_search, col_add_folder = st.columns([3, 2])
     search_q = col_search.text_input("🔍 Rechercher une recette (nom ou ingrédient)", "").lower()
 
@@ -122,8 +121,6 @@ with tab_recettes:
 
     st.divider()
 
-    # Organisation des recettes par dossier
-    # Une recette peut être dans un ou plusieurs dossiers, ou non classée
     folder_map = {f_name: [] for f_name in user_folders}
     unclassified_recipes = []
 
@@ -146,10 +143,10 @@ with tab_recettes:
         if not assigned:
             unclassified_recipes.append(r)
 
-    # Affichage des dossiers existants
     if not user_folders and not recipes_list:
-        st.info("Aucun dossier ni recette enregistrée. Commence par créer un dossier ci-dessus ou importer une recette !")
+        st.info("Aucun dossier ni recette enregistrée. Crée un dossier ci-dessus ou importe une recette !")
     else:
+        # Affichage dossiers
         for f_name in user_folders:
             f_recipes = folder_map.get(f_name, [])
             with st.expander(f"📁 **{f_name}** ({len(f_recipes)} recette{'s' if len(f_recipes) > 1 else ''})"):
@@ -164,10 +161,11 @@ with tab_recettes:
                     st.caption("Ce dossier est vide.")
                 else:
                     for r in f_recipes:
-                        st.markdown(f"#### 🍽️ {r['title']} ({r.get('prep_time', '')} • {r.get('calories', '')})")
+                        base_portions = int(r.get("portions", 2) or 2)
+                        st.markdown(f"#### 🍽️ {r['title']} — `{base_portions} pers.` ({r.get('prep_time', '')} • {r.get('calories', '')})")
                         c1, c2 = st.columns(2)
                         with c1:
-                            st.markdown("**🛒 Ingrédients :**")
+                            st.markdown(f"**🛒 Ingrédients (pour {base_portions} pers.) :**")
                             for ing in r.get("ingredients", []):
                                 if isinstance(ing, dict):
                                     st.write(f"- {ing.get('qty', '')} {ing.get('unit', '')} **{ing.get('name', '')}** *({ing.get('rayon', '')})*")
@@ -179,21 +177,26 @@ with tab_recettes:
                             if r.get("source_url"):
                                 st.link_button("🔗 Voir la vidéo", r["source_url"])
 
-                        # Ranger la recette dans d'autres dossiers
+                        # Édition dossiers et portions
                         curr_r_folders = r.get("tags") or r.get("folders") or []
                         if not isinstance(curr_r_folders, list):
                             curr_r_folders = []
 
-                        col_mv1, col_mv2 = st.columns([3, 1])
+                        col_mv1, col_mv2, col_mv3 = st.columns([3, 1, 1])
                         new_f_assigned = col_mv1.multiselect(
-                            "Dossiers de cette recette :",
+                            "Dossiers :",
                             options=user_folders,
                             default=[f for f in curr_r_folders if f in user_folders],
                             key=f"m_fold_{f_name}_{r['id']}"
                         )
-                        if col_mv2.button("Enregistrer", key=f"btn_save_{f_name}_{r['id']}"):
+                        edit_portions = col_mv2.number_input("Portions", min_value=1, max_value=20, value=base_portions, key=f"edit_p_{f_name}_{r['id']}")
+                        
+                        if col_mv3.button("Enregistrer", key=f"btn_save_{f_name}_{r['id']}"):
                             if supabase:
-                                supabase.table("recipes").update({"tags": new_f_assigned}).eq("id", r["id"]).execute()
+                                supabase.table("recipes").update({
+                                    "tags": new_f_assigned,
+                                    "portions": edit_portions
+                                }).eq("id", r["id"]).execute()
                                 st.rerun()
 
                         if st.button("🗑️ Supprimer la recette", key=f"del_rec_{f_name}_{r['id']}"):
@@ -202,14 +205,15 @@ with tab_recettes:
                                 st.rerun()
                         st.divider()
 
-        # Dossier spécial pour les recettes non rangées
+        # Recettes non classées
         if unclassified_recipes:
             with st.expander(f"📂 **Recettes non classées** ({len(unclassified_recipes)})"):
                 for r in unclassified_recipes:
-                    st.markdown(f"#### 🍽️ {r['title']} ({r.get('prep_time', '')} • {r.get('calories', '')})")
+                    base_portions = int(r.get("portions", 2) or 2)
+                    st.markdown(f"#### 🍽️ {r['title']} — `{base_portions} pers.` ({r.get('prep_time', '')} • {r.get('calories', '')})")
                     c1, c2 = st.columns(2)
                     with c1:
-                        st.markdown("**🛒 Ingrédients :**")
+                        st.markdown(f"**🛒 Ingrédients (pour {base_portions} pers.) :**")
                         for ing in r.get("ingredients", []):
                             if isinstance(ing, dict):
                                 st.write(f"- {ing.get('qty', '')} {ing.get('unit', '')} **{ing.get('name', '')}** *({ing.get('rayon', '')})*")
@@ -221,15 +225,20 @@ with tab_recettes:
                         if r.get("source_url"):
                             st.link_button("🔗 Voir la vidéo", r["source_url"])
 
-                    col_as1, col_as2 = st.columns([3, 1])
+                    col_as1, col_as2, col_as3 = st.columns([3, 1, 1])
                     assign_to = col_as1.multiselect(
                         "Ranger dans les dossiers :",
                         options=user_folders,
                         key=f"assign_unclass_{r['id']}"
                     )
-                    if col_as2.button("Ranger", key=f"btn_unclass_{r['id']}"):
+                    edit_portions_unclass = col_as2.number_input("Portions", min_value=1, max_value=20, value=base_portions, key=f"edit_p_unclass_{r['id']}")
+                    
+                    if col_as3.button("Enregistrer", key=f"btn_unclass_{r['id']}"):
                         if supabase:
-                            supabase.table("recipes").update({"tags": assign_to}).eq("id", r["id"]).execute()
+                            supabase.table("recipes").update({
+                                "tags": assign_to,
+                                "portions": edit_portions_unclass
+                            }).eq("id", r["id"]).execute()
                             st.rerun()
 
                     if st.button("🗑️ Supprimer la recette", key=f"del_unclass_{r['id']}"):
@@ -244,7 +253,10 @@ with tab_recettes:
 with tab_import:
     st.subheader("📥 Importer depuis Instagram Reel, TikTok ou Shorts")
     video_url = st.text_input("Lien de la vidéo", placeholder="https://www.instagram.com/reel/...")
-    target_folder = st.selectbox("📁 Ranger directement dans le dossier (optionnel)", ["— Aucun (non classé) —"] + user_folders)
+    
+    col_imp1, col_imp2 = st.columns([2, 1])
+    target_folder = col_imp1.selectbox("📁 Ranger directement dans le dossier (optionnel)", ["— Aucun (non classé) —"] + user_folders)
+    manual_portions = col_imp2.number_input("Nombre de personnes (base)", min_value=1, max_value=20, value=2)
 
     if st.button("🪄 Extraire et sauvegarder (+30 XP)", type="primary"):
         if not video_url:
@@ -261,10 +273,12 @@ with tab_import:
                     if target_folder != "— Aucun (non classé) —":
                         chosen_folders.append(target_folder)
 
+                    final_portions = manual_portions if manual_portions > 0 else rec.get("portions", 2)
+
                     if supabase:
                         insert_payload = {
                             "title": rec.get("title", "Sans titre"),
-                            "portions": rec.get("portions", 2),
+                            "portions": int(final_portions),
                             "prep_time": rec.get("prep_time", "20 min"),
                             "calories": rec.get("calories", "500 kcal"),
                             "tags": chosen_folders,
@@ -286,7 +300,7 @@ with tab_import:
 
                         db.add_xp(30)
 
-                    st.success(f"Recette « {rec.get('title')} » enregistrée (+30 XP) !")
+                    st.success(f"Recette « {rec.get('title')} » ({final_portions} pers.) enregistrée (+30 XP) !")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Erreur d'import : {e}")
@@ -299,6 +313,7 @@ with tab_frigo:
     st.caption("Indique tes ingrédients restants : l'IA compose une recette express avec tes placards.")
 
     leftover_input = st.text_input("Ingrédients à utiliser", placeholder="Ex : 2 œufs, reste de lardons, crème, courgette...")
+    frigo_portions = st.number_input("Nombre de personnes pour ce repas", min_value=1, max_value=10, value=2)
 
     if st.button("🪄 Générer une Recette Express", type="primary"):
         if not leftover_input:
@@ -318,10 +333,11 @@ with tab_frigo:
                     Tu es un chef anti-gaspillage créatif et rapide.
                     L'utilisateur veut utiliser ces restes : {leftover_input}
                     Il a en stock dans son placard permanent : {', '.join(placard_available)}
+                    Nombre de personnes : {frigo_portions}
 
                     Tâche :
-                    1. Donne une idée de plat simple, rapide et savoureux.
-                    2. Donne les proportions pour 1 ou 2 personnes.
+                    1. Donne une idée de plat simple, rapide et savoureux pour {frigo_portions} personne(s).
+                    2. Donne les proportions adaptées.
                     3. Détaille la préparation en 3 étapes claires (< 15 min).
                     """
                     resp_ai = client.models.generate_content(model="gemini-3.6-flash", contents=prompt)
@@ -411,7 +427,7 @@ with tab_courses:
 
         if rec_name in rec_by_title:
             r = rec_by_title[rec_name]
-            base_portions = r.get("portions", 2) or 2
+            base_portions = int(r.get("portions", 2) or 2)
             ratio = planned_portions / base_portions
 
             for raw_ing in r.get("ingredients", []):
@@ -439,7 +455,7 @@ with tab_courses:
                 if qty is not None:
                     consolidated[key]["total_qty"] += (float(qty) * ratio)
 
-                meal_label = f"{rec_name} ({day[:3]} {meal_time})"
+                meal_label = f"{rec_name} ({day[:3]} {meal_time} • {planned_portions}p)"
                 if meal_label not in consolidated[key]["meals"]:
                     consolidated[key]["meals"].append(meal_label)
 

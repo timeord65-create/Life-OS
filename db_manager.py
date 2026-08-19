@@ -13,6 +13,7 @@ def get_secret(key: str, default: str = None):
 supabase_url = get_secret("SUPABASE_URL")
 supabase_key = get_secret("SUPABASE_KEY")
 
+@st.cache_resource
 def get_supabase_client():
     if supabase_url and supabase_key:
         try:
@@ -28,6 +29,20 @@ def init_db():
     try:
         conn = get_connection()
         c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS local_profile (
+                id INTEGER PRIMARY KEY,
+                xp INTEGER DEFAULT 0,
+                level INTEGER DEFAULT 1,
+                streak INTEGER DEFAULT 0,
+                title TEXT DEFAULT '🌱 Débutant',
+                avatar TEXT DEFAULT '🧙‍♂️'
+            )
+        """)
+        c.execute("""
+            INSERT OR IGNORE INTO local_profile (id, xp, level, streak, title, avatar)
+            VALUES (1, 0, 1, 0, '🌱 Débutant', '🧙‍♂️')
+        """)
         c.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,29 +117,46 @@ def format_profile_dict(raw: dict = None) -> SafeProfileDict:
     return SafeProfileDict(data)
 
 def get_profile() -> SafeProfileDict:
+    """Récupère le profil depuis Supabase ou fallback SQLite."""
     client = get_supabase_client()
-    if not client:
-        return format_profile_dict()
+    if client:
+        try:
+            res = client.table("user_profile").select("*").eq("id", 1).execute()
+            if res.data and len(res.data) > 0:
+                return format_profile_dict(res.data[0])
+            init_raw = {"id": 1, "xp": 0, "level": 1, "streak": 0, "title": "🌱 Débutant", "avatar": "🧙‍♂️"}
+            client.table("user_profile").insert(init_raw).execute()
+            return format_profile_dict(init_raw)
+        except Exception:
+            pass
+
+    # Fallback SQLite local
     try:
-        res = client.table("user_profile").select("*").eq("id", 1).execute()
-        if res.data and len(res.data) > 0:
-            return format_profile_dict(res.data[0])
-        init_raw = {"id": 1, "xp": 0, "level": 1, "streak": 0, "title": "🌱 Débutant", "avatar": "🧙‍♂️"}
-        client.table("user_profile").insert(init_raw).execute()
-        return format_profile_dict(init_raw)
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("SELECT id, xp, level, streak, title, avatar FROM local_profile WHERE id = 1")
+        row = c.fetchone()
+        conn.close()
+        if row:
+            return format_profile_dict({
+                "id": row[0], "xp": row[1], "level": row[2], "streak": row[3], "title": row[4], "avatar": row[5]
+            })
     except Exception:
-        return format_profile_dict()
+        pass
+
+    return format_profile_dict()
 
 get_user_profile = get_profile
 
 def add_xp(amount: int):
-    """Ajoute de l'XP, met à jour Supabase et retourne les nouvelles valeurs."""
-    client = get_supabase_client()
+    """Ajoute de l'XP et synchronise Supabase + SQLite."""
     prof = get_profile()
     new_total_xp = prof["total_xp"] + amount
     new_level = max(1, (new_total_xp // 100) + 1)
     new_title = get_title_for_level(new_level)
 
+    # 1. Sauvegarde Supabase Cloud
+    client = get_supabase_client()
     if client:
         try:
             client.table("user_profile").upsert({
@@ -134,21 +166,20 @@ def add_xp(amount: int):
                 "title": new_title
             }, on_conflict="id").execute()
         except Exception as e:
-            print(f"Erreur update XP : {e}")
+            st.error(f"Erreur Supabase XP : {e}")
+
+    # 2. Sauvegarde SQLite de secours
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("""
+            UPDATE local_profile 
+            SET xp = ?, level = ?, title = ? 
+            WHERE id = 1
+        """, (new_total_xp, new_level, new_title))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
     return new_total_xp, new_level
-
-def add_transaction(t_type: str, category: str, amount: float, date_str: str):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("INSERT INTO transactions (type, category, amount, date) VALUES (?, ?, ?, ?)", (t_type, category, amount, date_str))
-    conn.commit()
-    conn.close()
-
-def get_transactions():
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT * FROM transactions ORDER BY date DESC")
-    rows = c.fetchall()
-    conn.close()
-    return rows

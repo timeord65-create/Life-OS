@@ -3,6 +3,9 @@ import sqlite3
 import streamlit as st
 from supabase import create_client, Client
 
+# --- CONSTANTES & CONFIGURATION ---
+DB_FILE = "life_os.db"
+
 def get_secret(key: str, default: str = None):
     if key in st.secrets:
         return st.secrets[key]
@@ -20,10 +23,15 @@ def get_supabase_client():
             return None
     return None
 
+def get_connection():
+    """Retourne une connexion vers la base SQLite locale."""
+    return sqlite3.connect(DB_FILE)
+
+# --- INITIALISATION LOCALE ---
 def init_db():
-    """Initialisation de secours locale (SQLite)."""
+    """Crée les tables SQLite locales si inexistantes."""
     try:
-        conn = sqlite3.connect("life_os.db")
+        conn = get_connection()
         c = conn.cursor()
         c.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
@@ -55,6 +63,7 @@ def init_db():
     except Exception:
         pass
 
+# --- GESTION PROFIL RPG & XP ---
 def get_title_for_level(lvl: int) -> str:
     if lvl < 3:
         return "🌱 Débutant"
@@ -70,7 +79,7 @@ def get_title_for_level(lvl: int) -> str:
         return "⚡ Légende"
 
 class SafeProfileDict(dict):
-    """Dictionnaire anti-crash : renvoie une valeur par défaut si une clé manque."""
+    """Dictionnaire sécurisé : renvoie 0 au lieu de lever une KeyError."""
     def __missing__(self, key):
         return 0
 
@@ -135,3 +144,19 @@ def add_xp(amount: int):
             print(f"Erreur update XP : {e}")
 
     return new_total_xp, new_level
+
+# --- FONCTIONS UTILITAIRES SQLITE ---
+def add_transaction(t_type: str, category: str, amount: float, date_str: str):
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("INSERT INTO transactions (type, category, amount, date) VALUES (?, ?, ?, ?)", (t_type, category, amount, date_str))
+    conn.commit()
+    conn.close()
+
+def get_transactions():
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM transactions ORDER BY date DESC")
+    rows = c.fetchall()
+    conn.close()
+    return rows

@@ -60,54 +60,62 @@ def get_title_for_level(lvl: int) -> str:
     else:
         return "👑 Légende"
 
-def get_profile():
-    """Récupère le profil complet avec gestion de toutes les clés d'affichage."""
-    client = get_supabase_client()
-    default_prof = {
+def format_profile_dict(raw: dict = None) -> dict:
+    """Construit un dictionnaire complet avec toutes les variables attendues par l'interface."""
+    raw = raw or {}
+    total_xp = int(raw.get("xp", 0) or 0)
+    xp_per_level = 100
+    level = max(1, (total_xp // xp_per_level) + 1)
+    xp_in_level = total_xp % xp_per_level
+    streak = int(raw.get("streak", 0) or 0)
+
+    return {
         "id": 1,
-        "xp": 0,
-        "level": 1,
-        "title": "🌱 Débutant",
-        "streak": 0
+        "xp": total_xp,
+        "total_xp": total_xp,
+        "xp_in_level": xp_in_level,
+        "xp_needed": xp_per_level,
+        "level": level,
+        "title": raw.get("title") or get_title_for_level(level),
+        "streak": streak,
+        "avatar": raw.get("avatar", "🧙‍♂️")
     }
+
+def get_profile() -> dict:
+    """Récupère le profil complet depuis Supabase avec repli sécurisé."""
+    client = get_supabase_client()
     if not client:
-        return default_prof
+        return format_profile_dict()
     try:
         res = client.table("user_profile").select("*").eq("id", 1).execute()
         if res.data:
-            p = res.data[0]
-            lvl = p.get("level", 1) or 1
-            p["level"] = lvl
-            p["xp"] = p.get("xp", 0) or 0
-            p["title"] = p.get("title") or get_title_for_level(lvl)
-            p["streak"] = p.get("streak", 0) or 0
-            return p
-        init_data = {"id": 1, "xp": 0, "level": 1}
-        client.table("user_profile").insert(init_data).execute()
-        return default_prof
+            return format_profile_dict(res.data[0])
+        
+        # Insertion d'une ligne initiale si la table est vide
+        init_raw = {"id": 1, "xp": 0, "level": 1}
+        client.table("user_profile").insert(init_raw).execute()
+        return format_profile_dict(init_raw)
     except Exception:
-        return default_prof
+        return format_profile_dict()
 
 # Alias de compatibilité
 get_user_profile = get_profile
 
 def add_xp(amount: int):
-    """Ajoute de l'XP et recalcule le niveau automatiquement."""
+    """Ajoute de l'XP et recalcule le profil."""
     client = get_supabase_client()
-    if not client:
-        return 0, 1
+    prof = get_profile()
+    new_total_xp = prof["total_xp"] + amount
+    new_level = max(1, (new_total_xp // 100) + 1)
 
-    profile = get_profile()
-    current_xp = profile.get("xp", 0) + amount
-    new_level = max(1, (current_xp // 100) + 1)
+    if client:
+        try:
+            client.table("user_profile").upsert({
+                "id": 1,
+                "xp": new_total_xp,
+                "level": new_level
+            }).execute()
+        except Exception as e:
+            print(f"Erreur update XP : {e}")
 
-    try:
-        client.table("user_profile").upsert({
-            "id": 1,
-            "xp": current_xp,
-            "level": new_level
-        }).execute()
-    except Exception as e:
-        print(f"Erreur update XP : {e}")
-
-    return current_xp, new_level
+    return new_total_xp, new_level

@@ -8,7 +8,7 @@ import yt_dlp
 from google import genai
 import db_manager as db
 
-st.set_page_config(page_title="Hub Alimentation", page_icon="🍳", layout="wide")
+st.set_page_config(page_title="Hub Alimentation Multi-Espaces", page_icon="🍳", layout="wide")
 
 supabase = db.get_supabase_client()
 gemini_key = db.get_secret("GEMINI_API_KEY")
@@ -61,25 +61,24 @@ with st.sidebar:
         current_space = None
         current_space_label = None
 
-# --- MASQUER LA NAVIGATION GAUCHE SI CE N'EST PAS TOI (ADMIN) ---
+# Masquer la navigation globale pour les utilisateurs non-admin
 if current_role != "Admin":
     st.markdown("""
         <style>
-            /* Masque la liste des autres pages dans la sidebar */
             [data-testid="stSidebarNav"] {
                 display: none !important;
             }
         </style>
     """, unsafe_allow_html=True)
 
-# --- SI PAS DE PIN VALIDE ---
+# Si pas de PIN valide
 if not current_space:
     st.title("🍳 Hub Alimentation")
     st.warning("🔒 Entre ton code PIN dans le menu à gauche pour afficher les recettes et le planning.")
     st.stop()
 
 # ==========================================
-# ESPACE DÉVERROUILLÉ
+# ESPACE ACTIF DÉVERROUILLÉ
 # ==========================================
 st.title(f"🍳 Hub Alimentation — {current_space_label}")
 
@@ -148,7 +147,7 @@ def parse_recipe_with_gemini(raw_text: str, api_key: str):
     )
     return json.loads(response.text)
 
-# --- CHARGEMENT DONNÉES FILTRÉES ---
+# --- CHARGEMENT DES DOSSIERS & RECETTES FILTRÉES ---
 user_folders = []
 recipes_list = []
 
@@ -160,8 +159,24 @@ if supabase:
         pass
 
     try:
-        res_r = supabase.table("recipes").select("*").eq("space", current_space).order("id", desc=True).execute()
-        recipes_list = res_r.data or []
+        res_all_r = supabase.table("recipes").select("*").order("id", desc=True).execute()
+        all_r_data = res_all_r.data or []
+        
+        # Filtre les recettes visibles dans cet espace
+        for r in all_r_data:
+            r_spaces = r.get("spaces") or []
+            if isinstance(r_spaces, str):
+                try:
+                    r_spaces = json.loads(r_spaces)
+                except Exception:
+                    r_spaces = [r_spaces]
+            if not isinstance(r_spaces, list):
+                r_spaces = [r.get("space", "coloc")]
+            
+            # Si la recette est disponible dans l'espace courant
+            if current_space in r_spaces or r.get("space") == current_space:
+                r["spaces"] = r_spaces
+                recipes_list.append(r)
     except Exception:
         pass
 
@@ -176,7 +191,7 @@ with tab_recettes:
 
     with col_add_folder:
         with st.popover(f"➕ Créer un dossier dans {current_space_label}", use_container_width=True):
-            new_f_name = st.text_input("Nom du dossier", placeholder="Ex: Repas rapides, Plats d'hiver...")
+            new_f_name = st.text_input("Nom du dossier", placeholder="Ex: Plats d'hiver, Pâtes, Poulet...")
             if st.button("Créer le dossier", type="primary") and new_f_name:
                 clean_name = new_f_name.strip()
                 if clean_name not in user_folders and supabase:
@@ -215,7 +230,7 @@ with tab_recettes:
             unclassified_recipes.append(r)
 
     if not user_folders and not recipes_list:
-        st.info(f"Aucun dossier ni recette enregistrée dans l'espace {current_space_label}.")
+        st.info(f"Aucune recette disponible dans l'espace {current_space_label}.")
     else:
         for f_name in user_folders:
             f_recipes = folder_map.get(f_name, [])
@@ -251,6 +266,7 @@ with tab_recettes:
                         if not isinstance(curr_r_folders, list):
                             curr_r_folders = []
 
+                        # --- CONTRÔLE ADMIN / UTILISATEUR ---
                         col_mv1, col_mv2, col_mv3 = st.columns([3, 1, 1])
                         new_f_assigned = col_mv1.multiselect(
                             "Dossiers :",
@@ -260,12 +276,29 @@ with tab_recettes:
                         )
                         edit_portions = col_mv2.number_input("Portions", min_value=1, max_value=20, value=base_portions, key=f"edit_p_{current_space}_{f_name}_{r['id']}")
                         
+                        # Sélecteur d'espaces exclusif Admin
+                        active_spaces = r.get("spaces", [current_space])
+                        if current_role == "Admin":
+                            st.markdown("🔄 **Diffusion dans les espaces (Admin) :**")
+                            space_options = list(SPACE_CONFIG.keys())
+                            selected_spaces_for_r = st.multiselect(
+                                "Visible dans :",
+                                options=space_options,
+                                default=[sp for sp in active_spaces if sp in space_options],
+                                format_func=lambda x: SPACE_CONFIG[x],
+                                key=f"admin_spaces_assign_{r['id']}_{f_name}"
+                            )
+                        else:
+                            selected_spaces_for_r = active_spaces
+
                         if col_mv3.button("Enregistrer", key=f"btn_save_{current_space}_{f_name}_{r['id']}"):
                             if supabase:
                                 supabase.table("recipes").update({
                                     "tags": new_f_assigned,
-                                    "portions": edit_portions
+                                    "portions": edit_portions,
+                                    "spaces": selected_spaces_for_r
                                 }).eq("id", r["id"]).execute()
+                                st.success("Recette mise à jour !")
                                 st.rerun()
 
                         if st.button("🗑️ Supprimer la recette", key=f"del_rec_{current_space}_{f_name}_{r['id']}"):
@@ -274,6 +307,7 @@ with tab_recettes:
                                 st.rerun()
                         st.divider()
 
+        # Recettes non classées
         if unclassified_recipes:
             with st.expander(f"📂 **Recettes non classées** ({len(unclassified_recipes)})"):
                 for r in unclassified_recipes:
@@ -301,11 +335,26 @@ with tab_recettes:
                     )
                     edit_portions_unclass = col_as2.number_input("Portions", min_value=1, max_value=20, value=base_portions, key=f"edit_p_unclass_{current_space}_{r['id']}")
                     
+                    active_spaces_u = r.get("spaces", [current_space])
+                    if current_role == "Admin":
+                        st.markdown("🔄 **Diffusion dans les espaces (Admin) :**")
+                        space_options = list(SPACE_CONFIG.keys())
+                        selected_spaces_u = st.multiselect(
+                            "Visible dans :",
+                            options=space_options,
+                            default=[sp for sp in active_spaces_u if sp in space_options],
+                            format_func=lambda x: SPACE_CONFIG[x],
+                            key=f"admin_spaces_assign_u_{r['id']}"
+                        )
+                    else:
+                        selected_spaces_u = active_spaces_u
+
                     if col_as3.button("Enregistrer", key=f"btn_unclass_{current_space}_{r['id']}"):
                         if supabase:
                             supabase.table("recipes").update({
                                 "tags": assign_to,
-                                "portions": edit_portions_unclass
+                                "portions": edit_portions_unclass,
+                                "spaces": selected_spaces_u
                             }).eq("id", r["id"]).execute()
                             st.rerun()
 
@@ -325,6 +374,17 @@ with tab_import:
     col_imp1, col_imp2 = st.columns([2, 1])
     target_folder = col_imp1.selectbox("📁 Ranger directement dans le dossier (optionnel)", ["— Aucun (non classé) —"] + user_folders)
     manual_portions = col_imp2.number_input("Nombre de personnes (base)", min_value=1, max_value=20, value=2)
+
+    # Si Admin, choisir où l'envoyer directement dès l'import
+    if current_role == "Admin":
+        initial_spaces = st.multiselect(
+            "Diffuser cette recette dans :",
+            options=list(SPACE_CONFIG.keys()),
+            default=[current_space],
+            format_func=lambda x: SPACE_CONFIG[x]
+        )
+    else:
+        initial_spaces = [current_space]
 
     if st.button("🪄 Extraire et sauvegarder (+30 XP)", type="primary"):
         if not video_url:
@@ -354,6 +414,7 @@ with tab_import:
                             "instructions": rec.get("instructions", ""),
                             "source_url": video_url,
                             "date_added": datetime.now().strftime("%Y-%m-%d"),
+                            "spaces": initial_spaces,
                             "space": current_space
                         }
                         supabase.table("recipes").insert(insert_payload).execute()
@@ -369,7 +430,7 @@ with tab_import:
 
                         db.add_xp(30)
 
-                    st.success(f"Recette « {rec.get('title')} » ({final_portions} pers.) enregistrée dans {current_space_label} (+30 XP) !")
+                    st.success(f"Recette « {rec.get('title')} » enregistrée (+30 XP) !")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Erreur d'import : {e}")

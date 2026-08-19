@@ -1,3 +1,5 @@
+import os
+import glob
 import streamlit as st
 from datetime import datetime, date
 import db_manager as db
@@ -8,6 +10,11 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Fonction pour retrouver le chemin exact d'une page
+def find_page_path(pattern: str, default: str) -> str:
+    matches = glob.glob(pattern)
+    return matches[0] if matches else default
 
 # Chargement du profil utilisateur & de l'XP
 profile = db.get_profile()
@@ -41,7 +48,7 @@ with col_xp_val:
 st.divider()
 
 # ==========================================
-# SECTION HABITUDES & OBJECTIFS DU JOUR
+# SECTION HABITUDES DU JOUR
 # ==========================================
 col_habits, col_quick_access = st.columns([3, 2])
 
@@ -60,39 +67,44 @@ with col_habits:
             if is_done:
                 done_count += 1
 
-            # Checkbox dynamique
             checked = st.checkbox(
                 f"{h_name}",
                 value=is_done,
                 key=f"dash_hab_{h_name}"
             )
 
-            # Enregistrement immédiat si modification
             if checked != is_done:
                 db.toggle_habit_log(h_name, checked, xp_reward=15)
                 st.rerun()
 
-        # Ratio d'accomplissement du jour
         ratio = (done_count / len(habits_list)) if habits_list else 0.0
         st.caption(f"🎯 Habitudes validées aujourd'hui : **{done_count}/{len(habits_list)}** ({int(ratio*100)}%)")
 
 with col_quick_access:
     st.subheader("🚀 Accès Rapides")
-    
+
+    # Résolution dynamique des chemins de fichiers
+    path_cuisine = find_page_path("pages/*Planning*Courses*.py", "pages/4_🍳_Planning_Courses_Placard.py")
+    path_energie = find_page_path("pages/*Energie*Sommeil*.py", "pages/6_🔋_Energie_Sommeil_Recup.py")
+    path_finances = find_page_path("pages/*Finances*Budget*.py", "pages/2_💰_Finances_Budget.py")
+
     with st.container(border=True):
         st.markdown("🍳 **Cuisine & Planning Repas**")
-        st.caption("Consulte ton planning de la semaine, génère ta liste de courses ou vide ton frigo.")
-        st.page_link("pages/4_🍳_Planning_Courses_Placard.py", label="Ouvrir le Hub Cuisine", icon="🍳")
+        st.caption("Consulte ton planning, génère ta liste de courses ou vide ton frigo.")
+        if os.path.exists(path_cuisine):
+            st.page_link(path_cuisine, label="Ouvrir le Hub Cuisine", icon="🍳")
 
     with st.container(border=True):
         st.markdown("🔋 **Sommeil & Énergie**")
         st.caption("Enregistre ta nuit pour valider tes points de forme.")
-        st.page_link("pages/6_🔋_Energie_Sommeil_Recup.py", label="Suivi Énergie & Récupération", icon="🔋")
+        if os.path.exists(path_energie):
+            st.page_link(path_energie, label="Suivi Énergie & Récupération", icon="🔋")
 
     with st.container(border=True):
         st.markdown("💰 **Finances & Budget**")
         st.caption("Visualise tes dépenses et suis ton épargne.")
-        st.page_link("pages/2_💰_Finances_Budget.py", label="Gestion Budget", icon="💰")
+        if os.path.exists(path_finances):
+            st.page_link(path_finances, label="Gestion Budget", icon="💰")
 
 st.divider()
 
@@ -105,4 +117,4 @@ m1, m2, m3, m4 = st.columns(4)
 m1.metric(label="Niveau", value=f"Lvl {profile['level']}", delta=profile['title'])
 m2.metric(label="XP Total", value=f"{profile['total_xp']} pts", delta="+15 par habitude")
 m3.metric(label="Régularité", value=f"{profile['streak']} j", delta="En cours")
-m4.metric(label="Espace Actuel", value="Coloc / Maison", delta="Synchronisé")
+m4.metric(label="Espace Cuisine", value="Coloc / Maison", delta="Synchronisé")

@@ -24,6 +24,31 @@ SPACE_CONFIG = {
     "perso": "👤 Perso"
 }
 
+CATEGORIES_PLACARD = [
+    "🫒 Huiles, Vinaigres & Sauces",
+    "🧂 Épices & Aromates",
+    "🌾 Féculents, Farines & Conserves",
+    "🧄 Frais de Base / Condiments",
+    "☕ Petit-déjeuner & Sucré",
+    "📦 Autre Essentiel"
+]
+
+RAYONS_DEFAUT = [
+    "🥬 Fruits & Légumes",
+    "🥩 Boucherie & Poissonnerie",
+    "🧀 Frais & Produits Laitiers",
+    "🥫 Épicerie & Féculents",
+    "❄️ Surgelés",
+    "🧻 Hygiène & Entretien",
+    "📦 Autre"
+]
+
+SPECIAL_MEALS = [
+    "—",
+    "🥡 Restes / Tupperware",
+    "🍽️ Sortie / Restaurant"
+]
+
 # --- GESTION DU LOGIN PAR PIN (SIDEBAR) ---
 with st.sidebar:
     st.markdown("### 🔐 Accès Espace")
@@ -61,7 +86,6 @@ with st.sidebar:
         current_space = None
         current_space_label = None
 
-# Masquer la navigation globale de l'app si ce n'est pas l'Admin
 if current_role != "Admin":
     st.markdown("""
         <style>
@@ -71,15 +95,11 @@ if current_role != "Admin":
         </style>
     """, unsafe_allow_html=True)
 
-# Si aucun PIN valide n'est saisi
 if not current_space:
     st.title("🍳 Hub Alimentation")
     st.warning("🔒 Entre ton code PIN dans le menu de gauche pour déverrouiller ton espace de cuisine.")
     st.stop()
 
-# ==========================================
-# ESPACE ACTIF DÉVERROUILLÉ
-# ==========================================
 st.title(f"🍳 Hub Alimentation — {current_space_label}")
 
 tab_recettes, tab_import, tab_frigo, tab_plan, tab_courses, tab_placard = st.tabs([
@@ -90,22 +110,6 @@ tab_recettes, tab_import, tab_frigo, tab_plan, tab_courses, tab_placard = st.tab
     "🛒 Courses par Rayon",
     "🥫 Fond de Placard"
 ])
-
-RAYONS_DEFAUT = [
-    "🥬 Fruits & Légumes",
-    "🥩 Boucherie & Poissonnerie",
-    "🧀 Frais & Produits Laitiers",
-    "🥫 Épicerie & Féculents",
-    "❄️ Surgelés",
-    "🧻 Hygiène & Entretien",
-    "📦 Autre"
-]
-
-SPECIAL_MEALS = [
-    "—",
-    "🥡 Restes / Tupperware",
-    "🍽️ Sortie / Restaurant"
-]
 
 def extract_video_info(url: str):
     ydl_opts = {'quiet': True, 'no_warnings': True, 'skip_download': True}
@@ -270,7 +274,6 @@ with tab_recettes:
                         )
                         edit_portions = col_mv2.number_input("Portions", min_value=1, max_value=20, value=base_portions, key=f"edit_p_{current_space}_{f_name}_{r['id']}")
                         
-                        # Diffusion multi-espaces pour l'admin
                         active_spaces = r.get("spaces", [current_space])
                         if current_role == "Admin":
                             st.markdown("🔄 **Diffusion dans les espaces (Admin) :**")
@@ -416,7 +419,12 @@ with tab_import:
                             for item in detected_placard:
                                 clean = item.strip().capitalize()
                                 if clean.lower() not in existing:
-                                    supabase.table("placard").insert({"nom": clean, "en_stock": True, "space": current_space}).execute()
+                                    supabase.table("placard").insert({
+                                        "nom": clean, 
+                                        "categorie": "🧂 Épices & Aromates",
+                                        "en_stock": True, 
+                                        "space": current_space
+                                    }).execute()
 
                         db.add_xp(30)
 
@@ -661,28 +669,67 @@ with tab_courses:
             st.rerun()
 
 # ==========================================
-# TAB 6 : PLACARD
+# TAB 6 : FOND DE PLACARD (CLASSÉ PAR CATÉGORIES)
 # ==========================================
 with tab_placard:
     st.subheader(f"🥫 Fond de Placard — {current_space_label}")
-    st.caption("Coche les indispensables en stock dans cet endroit. Les ingrédients décochés vont directement dans la liste de courses.")
+    st.caption("Organisé par catégorie. Décocher un produit indique une **rupture de stock** et l'envoie directement sur la liste de courses !")
 
     if supabase:
         try:
             res_all_pl = supabase.table("placard").select("*").eq("space", current_space).order("nom").execute()
             items = res_all_pl.data or []
 
-            c1, c2 = st.columns([2, 1])
-            with c1:
-                for it in items:
-                    chk = st.checkbox(f"**{it['nom']}**", value=it["en_stock"], key=f"pl_i_{current_space}_{it['id']}")
-                    if chk != it["en_stock"]:
-                        supabase.table("placard").update({"en_stock": chk}).eq("id", it["id"]).execute()
-                        st.rerun()
-            with c2:
-                new_pl = st.text_input("Ajouter un essentiel", key=f"inp_pl_{current_space}")
-                if st.button("Ajouter au placard", key=f"btn_pl_{current_space}") and new_pl:
-                    supabase.table("placard").insert({"nom": new_pl.strip().capitalize(), "en_stock": True, "space": current_space}).execute()
-                    st.rerun()
+            # Regrouper par catégorie
+            cat_map = {c: [] for c in CATEGORIES_PLACARD}
+            for it in items:
+                cat = it.get("categorie") or "📦 Autre Essentiel"
+                if cat not in cat_map:
+                    cat_map[cat] = []
+                cat_map[cat].append(it)
+
+            col_p_left, col_p_right = st.columns([3, 2])
+
+            with col_p_left:
+                for cat_name, cat_items in cat_map.items():
+                    if cat_items:
+                        in_stock_cnt = sum(1 for x in cat_items if x.get("en_stock", True))
+                        out_cnt = len(cat_items) - in_stock_cnt
+                        badge = f"({in_stock_cnt}/{len(cat_items)} en stock)" if out_cnt == 0 else f"({in_stock_cnt}/{len(cat_items)} • ⚠️ {out_cnt} en rupture)"
+                        
+                        with st.expander(f"**{cat_name}** {badge}", expanded=True):
+                            for it in cat_items:
+                                c_chk, c_del = st.columns([5, 1])
+                                with c_chk:
+                                    chk = st.checkbox(
+                                        f"**{it['nom']}**", 
+                                        value=it["en_stock"], 
+                                        key=f"pl_i_{current_space}_{it['id']}"
+                                    )
+                                    if chk != it["en_stock"]:
+                                        supabase.table("placard").update({"en_stock": chk}).eq("id", it["id"]).execute()
+                                        st.rerun()
+                                with c_del:
+                                    if st.button("🗑️", key=f"del_pli_{it['id']}", help="Supprimer cet essentiel"):
+                                        supabase.table("placard").delete().eq("id", it["id"]).execute()
+                                        st.rerun()
+
+            with col_p_right:
+                with st.container(border=True):
+                    st.markdown("#### ➕ Ajouter un indispensable")
+                    new_pl_nom = st.text_input("Nom de l'ingrédient", placeholder="Ex: Paprika fumé, Sirop d'érable...", key=f"inp_pl_nom_{current_space}")
+                    new_pl_cat = st.selectbox("Catégorie de placard", CATEGORIES_PLACARD, key=f"inp_pl_cat_{current_space}")
+                    
+                    if st.button("Ajouter au fond de placard", type="primary", use_container_width=True, key=f"btn_add_pl_{current_space}"):
+                        if new_pl_nom:
+                            clean_nom = new_pl_nom.strip().capitalize()
+                            supabase.table("placard").insert({
+                                "nom": clean_nom,
+                                "categorie": new_pl_cat,
+                                "en_stock": True,
+                                "space": current_space
+                            }).execute()
+                            st.success(f"« {clean_nom} » ajouté dans {new_pl_cat} !")
+                            st.rerun()
         except Exception as e:
             st.error(f"Erreur placard : {e}")
